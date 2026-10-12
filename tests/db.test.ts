@@ -31,6 +31,7 @@ it("persists data in WAL mode, runs migrations once, and enforces uniqueness", (
     expect(core.identity.get(person.id).display_name).toBe("Persisted");
     expect(core.store.all("SELECT * FROM schema_migrations")).toEqual([
       { version: 1 },
+      { version: 2 },
     ]);
     expect(core.store.all("SELECT * FROM handle_events")).toHaveLength(1);
   } finally {

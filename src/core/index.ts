@@ -5,7 +5,7 @@ import { Handles } from "./handles.js";
 import { Conversations } from "./conversations.js";
 import { Resolver } from "./resolver.js";
 import { Authorization } from "./authorization.js";
-import { OutboxService } from "./outbox.js";
+import { OutboxService, type DispatchHooks } from "./outbox.js";
 import { ChannelRegistry } from "../channels/registry.js";
 import type { ChannelId, IngestEvent } from "../channels/channel.js";
 export class ContactsCore {
@@ -15,16 +15,20 @@ export class ContactsCore {
   readonly conversations: Conversations;
   readonly resolver: Resolver;
   readonly authorization: Authorization;
+  private readonly registry: ChannelRegistry;
   readonly outbox: OutboxService;
   constructor(
     options: {
       path?: string;
       registry?: ChannelRegistry;
       clock?: () => Date;
+      dispatchHooks?: DispatchHooks;
+      env?: NodeJS.ProcessEnv;
       rateLimits?: Partial<Record<ChannelId, number>>;
     } = {},
   ) {
     const registry = options.registry ?? new ChannelRegistry();
+    this.registry = registry;
     this.store = new Store(openDatabase(options.path), options.clock);
     this.identity = new Identity(this.store);
     this.handles = new Handles(this.store, this.identity, registry);
@@ -33,10 +37,15 @@ export class ContactsCore {
     this.authorization = new Authorization(this.store);
     const rates: Partial<Record<ChannelId, number>> = {
       instagram: 20,
+      tiktok: 10,
+      imessage: 60,
+      email: 60,
       ...options.rateLimits,
     };
     for (const c of ["imessage", "instagram", "email", "tiktok"] as const) {
-      const value = process.env[`CONTACTS_RATE_LIMIT_${c.toUpperCase()}`];
+      const value = (options.env ?? process.env)[
+        `CONTACTS_RATE_LIMIT_${c.toUpperCase()}`
+      ];
       if (value !== undefined) rates[c] = Number(value);
       const limit = rates[c];
       if (limit !== undefined && (!Number.isInteger(limit) || limit < 0))
@@ -50,6 +59,7 @@ export class ContactsCore {
       this.authorization,
       registry,
       rates,
+      options.dispatchHooks,
     );
   }
   ingest(event: IngestEvent) {
@@ -122,14 +132,67 @@ export class ContactsCore {
     );
   }
   syncStatus() {
-    return this.store.all<{
+    const rows = this.store.all<{
       channel: ChannelId;
       account_id: string;
       cursor: string | null;
       last_ok_at: string | null;
       last_error: string | null;
     }>("SELECT * FROM sync_state");
+    const result = rows.map((row) => ({
+      ...row,
+      status: this.registry.disabled.has(row.channel) ? "disabled" : "enabled",
+      disabled_reason: this.registry.disabled.get(row.channel)?.reason ?? null,
+    }));
+    for (const [channel, disabled] of this.registry.disabled) {
+      if (!rows.some((row) => row.channel === channel))
+        result.push({
+          channel,
+          account_id: disabled.account_id,
+          cursor: null,
+          last_ok_at: null,
+          last_error: null,
+          status: "disabled",
+          disabled_reason: disabled.reason,
+        });
+    }
+    return result;
   }
+  /** Storage stays in core; composition decides when a provider event is safe to reconcile. */
+  stageOutgoing(outboxId: string, event: IngestEvent): void {
+    const outbox = this.outbox.get(outboxId);
+    if (event.direction !== "out" || event.channel !== outbox.channel)
+      throw new Error("Staged event does not match outgoing dispatch");
+    this.store.run(
+      "INSERT INTO staged_outgoing VALUES (?,?) ON CONFLICT(outbox_id) DO UPDATE SET payload=excluded.payload",
+      outboxId,
+      JSON.stringify(event),
+    );
+  }
+  reconcileOutgoing(): void {
+    this.store.db.transaction(() => {
+      for (const row of this.store.all<{
+        outbox_id: string;
+        payload: IngestEvent;
+      }>(
+        "SELECT s.* FROM staged_outgoing s JOIN outbox o ON o.id=s.outbox_id WHERE o.status='sent'",
+      )) {
+        const outbox = this.outbox.get(row.outbox_id);
+        const message = this.store.one<{ external_id: string }>(
+          "SELECT external_id FROM messages WHERE id=?",
+          outbox.sent_message_id,
+        );
+        if (message?.external_id !== row.payload.external_id)
+          throw new Error("Staged outgoing ID does not match dispatch");
+        this.ingest(row.payload);
+        this.store.run(
+          "DELETE FROM staged_outgoing WHERE outbox_id=?",
+          row.outbox_id,
+        );
+      }
+    })();
+  }
+
   close(): void {
     this.store.db.close();
   }

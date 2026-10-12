@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ContactsCore } from "./core/index.js";
+import { fileURLToPath } from "node:url";
+import { createContactsSystem } from "./composition.js";
+import { loadEnvFile } from "node:process";
+import { existsSync } from "node:fs";
 import { createServer } from "./mcp/server.js";
-import { configuredChannels } from "./channels/registry.js";
-import { startDaemon, syncChannel } from "./daemon.js";
+import { startDaemon, startSyncLoops, syncChannel } from "./daemon.js";
 async function main(): Promise<void> {
   const [command, action, ...args] = process.argv.slice(2);
-  const registry = await configuredChannels();
-  const core = new ContactsCore({ registry });
+  const envPath = fileURLToPath(new URL("../.env", import.meta.url));
+  if (existsSync(envPath)) loadEnvFile(envPath);
+  const { core, registry } = await createContactsSystem({
+    path:
+      process.env.CONTACTS_DB ??
+      fileURLToPath(new URL("../data/contacts.db", import.meta.url)),
+  });
   if (command === "serve") {
     try {
       const daemon = await startDaemon(core, registry);
@@ -49,8 +56,13 @@ async function main(): Promise<void> {
   }
   if (command === "stdio") {
     const server = createServer(core);
+    const sync = startSyncLoops(core, registry);
+    let closing = false;
     const close = async () => {
+      if (closing) return;
+      closing = true;
       await server.close();
+      await sync.close();
       core.close();
     };
     process.once("SIGINT", () => {

@@ -10,6 +10,14 @@ import { Handles } from "./handles.js";
 import { Conversations } from "./conversations.js";
 import { Authorization } from "./authorization.js";
 import type { Conversation, Handle, Outbox, SendRequest } from "./types.js";
+export interface DispatchHooks {
+  send?: (
+    id: string,
+    target: SendTarget,
+    content: SendContent,
+  ) => Promise<{ externalId: string; conversationExternalId: string }>;
+  afterSent?: (id: string) => Promise<void>;
+}
 export class OutboxService {
   constructor(
     private s: Store,
@@ -19,6 +27,7 @@ export class OutboxService {
     private auth: Authorization,
     private registry: ChannelRegistry,
     private rates: Partial<Record<ChannelId, number>>,
+    private hooks: DispatchHooks = {},
   ) {}
   private resolve(
     input: Pick<
@@ -281,7 +290,9 @@ export class OutboxService {
     })();
     let sent: { externalId: string; conversationExternalId: string };
     try {
-      sent = await this.registry.get(target.channel).send(target, o.payload);
+      sent = await (this.hooks.send
+        ? this.hooks.send(id, target, o.payload)
+        : this.registry.get(target.channel).send(target, o.payload));
     } catch (error) {
       this.s.run(
         "UPDATE outbox SET status='failed',error=? WHERE id=?",
@@ -348,6 +359,7 @@ export class OutboxService {
       target.conversation_id = conversation.id;
       target.conversationExternalId = conversation.external_id;
     })();
+    await this.hooks.afterSent?.(id);
     return this.result(this.get(id), target);
   }
 }

@@ -351,6 +351,7 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
         ...detail,
         ...outgoing,
         id: sent.id,
+        contacts_outbox_id: outboxId,
         message_id: detail.message_id,
         html: content.html ?? detail.html,
         headers: { ...detail.headers, ...headers },

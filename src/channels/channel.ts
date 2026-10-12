@@ -42,6 +42,9 @@ export interface IngestEvent {
 }
 export interface Channel {
   id: ChannelId;
+  /** The account whose sync cursor this adapter consumes. */
+  accountId?: string;
+  getCursor?(): string | undefined;
   capabilities: {
     startConversation: boolean;
     groups: boolean;

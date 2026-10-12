@@ -31,29 +31,11 @@ Thread keys use the first References ID, then In-Reply-To, resolving known/store
 
 Send uses the outbox ID verbatim as `Idempotency-Key`. Supply `getOutboxId(target, content)` or adapter-level `content.outbox_id`; missing/ambiguous dispatch context must fail before HTTP, never generate a random key. Reply headers use the stored actual RFC Message-ID and extend the parent's References. The provider-issued sent Message-ID is fetched after send and preserved in `raw.message_id`; a metadata retrieval failure still reports a successful send, but replies to that message are blocked until its RFC ID has been reconciled. Resend idempotency retention is 24 hours; this does not authorize blind retries of old outbox entries.
 
-### Registration and phase 1 integration seam
+### Composed registration and dispatch bridge
 
-The current `Channel.send` contract does not carry the outbox ID. Its core dispatch inserts an outgoing row **after** the adapter returns, so passing `core.ingest` directly as `onSent` causes a duplicate-row conflict. These are composition responsibilities until a future core API passes dispatch context and atomically reconciles the event:
+`src/composition.ts` is now the shared CLI/stdio/HTTP composition. `configuredChannels` builds the selected registry, and `createContactsSystem` supplies the email bridge. Outbox dispatch hooks carry an explicit outbox ID in `AsyncLocalStorage`; no payload matching or guessed dispatch IDs are used. `lookupMessage` rebuilds stored ingest events by Resend ID or RFC Message-ID through core. The adapter's outgoing raw metadata carries `contacts_outbox_id` so buffered staging retries retain the original dispatch context.
 
-```ts
-import { createEmailChannel } from "./channels/email.js";
-
-const email = createEmailChannel({
-  // Resolve exactly the sending outbox by target + payload; reject ambiguity.
-  getOutboxId: (target, content) => emailBridge.dispatchingOutboxId(target, content),
-  // Return an IngestEvent with conversation_external_id and raw Resend metadata.
-  lookupMessage: id => emailBridge.lookupStoredMessage(id),
-  // Durably stage; do not call phase 1 core.ingest here.
-  onSent: event => emailBridge.stageSent(event),
-});
-registry.register(email);
-
-// In the composition wrapper, immediately after each awaited send/approve:
-await email.flushSent(); // retries a failed staging sink; never sends email again
-await emailBridge.reconcileStaged(event => core.ingest(event));
-```
-
-`emailBridge` denotes the integrating application's durable composition adapter, not an implementation bundled here. It should map each external/RFC message ID to a stored event, provide the exact dispatching outbox ID, stage outgoing metadata durably and reconcile after core persistence. An offline integration test proves this ordering with an in-memory staging sink. If staging fails, `send` still returns the provider ID and retains the event in an in-process retry buffer; the application must call `flushSent()` and surface persistent staging errors. That buffer alone does not survive a crash. No registry, CLI, daemon, core or schema file was changed in this phase.
+`onSent` writes to core's durable `staged_outgoing` table. Core records the outgoing message and marks the outbox sent before the composition calls `flushSent()` and `core.reconcileOutgoing()`. Reconciliation checks the confirmed external ID, uses the existing `core.ingest` dedupe path and removes the staged event transactionally. Startup recovers committed sends with staged metadata. Entries whose outbox is still `sending` are retained for manual reconciliation, never resent automatically. A failure before durable staging remains in the adapter's process retry buffer; provider metadata that never reached disk before a crash still requires manual recovery. Reconciliation errors surface without changing an already-sent outbox to failed.
 
 Creator-system connection: the future composition adapter in the marketing repo should reuse the creator dashboard's approval inbox for contacts outbox drafts, retain `creator-crm` person links, and feed reconciled email events into the existing reply/follow-up jobs. Creators keeps do-not-contact/deal decisions; contacts keeps identities and conversation history. This avoids another outreach tracker or direct coupling between sections.
 
@@ -62,7 +44,7 @@ Verified against official Resend docs on 2026-10-12: [sending](https://resend.co
 
 `src/channels/tiktok.ts` exports `createTikTokChannel(opts)` implementing `Channel`, plus `getCursor()` and `getLastInboundAt(conversationExternalId)`. Options are `apiKey`, `accountId`, `baseUrl`, injectable `fetch` (the native fetch signature) and `clock`. Defaults read `ZERNIO_API_KEY`, `ZERNIO_TIKTOK_ACCOUNT_ID`, and `ZERNIO_BASE_URL` (default `https://zernio.com/api`). Auth is `Authorization: Bearer <key>`. No SDK or additional dependencies.
 
-Registration at the composition layer (not wired here):
+Registration is now wired by the shared composition; standalone adapter example:
 
 ```ts
 import { createTikTokChannel } from "./channels/tiktok.js";
@@ -72,7 +54,7 @@ registry.register(tiktok);
 
 Sync lists every conversation page with `accountId` and `platform=tiktok`, filters other accounts/platforms, fetches every message page with required `accountId`, and sorts each thread by timestamp and ID without assuming TikTok honors sort order. The opaque Zernio pagination cursors are forwarded verbatim. Partial account failures/skips and broken pagination throw instead of recording a successful empty sync. Unknown fields are retained in `raw: { conversation, message }`; invalid required IDs, timestamps and directions fail closed.
 
-Cursor integration for the daemon owner: persist `tiktok.getCursor()` into the existing `sync_state` for this account after a successful sync. The base `Channel` interface has no checkpoint return value, so the composition layer needs to call this adapter's small additional interface; core needs no edit. A watermark is advanced only when the generator resumes after a yielded event (after ingestion). Interrupted/failed ingest therefore permits safe replay. The base64url JSON cursor carries version/account plus each thread's latest message time, all IDs at that timestamp, and last inbound time. Resume scans all thread pages but yields only unseen watermark/newer messages. A delayed historic message older than a saved watermark, or an edit to an older message, requires a reconciliation sweep with `sync()` without a cursor; core deduplicates stable IDs. Never reset the stored cursor on a failed run.
+Cursor integration for the daemon owner: persist `tiktok.getCursor()` into the existing `sync_state` for this account after a successful sync. The composed sync runner calls the optional `Channel.getCursor()` after successful consumption and saves it for the configured account. A watermark is advanced only when the generator resumes after a yielded event (after ingestion). Interrupted/failed ingest therefore permits safe replay. The base64url JSON cursor carries version/account plus each thread's latest message time, all IDs at that timestamp, and last inbound time. Resume scans all thread pages but yields only unseen watermark/newer messages. A delayed historic message older than a saved watermark, or an edit to an older message, requires a reconciliation sweep with `sync()` without a cursor; core deduplicates stable IDs. Never reset the stored cursor on a failed run.
 
 ```ts
 for await (const event of tiktok.sync(savedCursor)) core.ingest(event);
@@ -96,7 +78,7 @@ Send requires an existing remote thread, correct account/channel, direct convers
 ### Exact live verification still needed (owner-authorized, not run)
 
 1. On the Air, ask the owner immediately before creating a Zernio account or final OAuth consent and before any spend. Connect the intended TikTok Business Account through the Business app, grant messaging permissions, enable incoming DMs/message requests and confirm eligible sign-up region. Record its Zernio account ID and put the key/account ID in untracked environment settings. Do not print secrets.
-2. Register the adapter above in the composition layer, use an isolated test database, and run `sync()` through `core.ingest`. Verify the actual GET `/v1/inbox/conversations?accountId=<id>&platform=tiktok&limit=100` is accepted. If `platform=tiktok` is rejected, capture the non-secret error and get vendor confirmation; test an accountId-only read separately before changing the adapter.
+2. Use the composed system with an isolated test database and run `sync tiktok`. Verify the actual GET `/v1/inbox/conversations?accountId=<id>&platform=tiktok&limit=100` is accepted. If `platform=tiktok` is rejected, capture the non-secret error and get vendor confirmation; test an accountId-only read separately before changing the adapter.
 3. Have the owner send an initial message manually to a consenting test participant, then have that participant send a reply. Sync again and verify remote conversation ID, user ID/username, direction, original timestamps, text and image metadata against TikTok. Compare old known threads/messages to determine pre-connect coverage; verify native-app outgoing visibility and page beyond 100 messages/conversations where available.
 4. Save `getCursor()` only after ingestion completes; recreate the adapter and sync with that cursor. Confirm zero duplicates, then a new inbound appears once and updates stored last inbound. Simulate an interrupted consumer and verify safe replay. Link the observed TikTok user ID/username to the test person with exact proof.
 5. With explicit authorization to send that one reply, invoke core `send_message` for the existing conversation within 48 hours. Confirm delivery in TikTok, sync its copy and confirm a single stored outgoing message matches the returned external ID. Test an owner-approved small PNG/JPG separately if image sending is required.

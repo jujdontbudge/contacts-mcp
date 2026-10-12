@@ -15,4 +15,5 @@ CREATE INDEX messages_time ON messages(sent_at);
 CREATE INDEX handles_person ON handles(person_id);
 CREATE INDEX outbox_rate ON outbox(channel,status,decided_at);
 `,
+  `CREATE TABLE staged_outgoing(outbox_id TEXT PRIMARY KEY REFERENCES outbox(id), payload TEXT NOT NULL);`,
 ];

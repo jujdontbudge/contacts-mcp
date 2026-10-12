@@ -1,18 +1,39 @@
 # contacts-mcp
 
-One local source of person IDs, channel handles and conversations for AI agents. Provides SQLite identity, resolution, audited handle edits, an authorized outbox, all MCP tools, an imsg-backed iMessage adapter and a daemon with authenticated HTTP. The fake adapter is only for offline tests.
+One local source of person IDs, channel handles and conversations for AI agents. Provides SQLite identity, resolution, audited handle edits, an authorized outbox, all MCP tools, iMessage (imsg), Instagram (Beeper Desktop), email (Resend), TikTok (Zernio), and a daemon with authenticated HTTP. The fake adapter is only for offline tests.
 
-## Install
+## Setup and agent connections
 
-Use Node 24 and npm:
+Use Node 24 and npm, then copy the environment template and fill in only the channels you want:
 
 ```sh
+cd /Users/johansardar/contacts-mcp
 npm ci
+cp .env.example .env
+# Edit .env: CONTACTS_CHANNELS=imessage,instagram,email,tiktok plus required keys.
 npm run build
-claude mcp add contacts -- node /Users/johansardar/contacts-mcp/dist/cli.js stdio
 ```
 
-Set `CONTACTS_DB` to an absolute path when the MCP host starts in a different directory. A new database is migrated automatically and uses WAL.
+Every CLI command loads `.env` from this repository root, including when launched from another working directory. Existing process environment values take precedence. The CLI defaults to the repository's `data/contacts.db`; set `CONTACTS_DB` to an absolute path to use another database. A new database is migrated automatically and uses WAL. Keep `.env` and databases private; both are ignored by git. Leaving `CONTACTS_CHANNELS` empty disables every adapter. Missing required credentials disable only that channel, reported by `sync_status` with `status: "disabled"` and `disabled_reason`; unknown channel IDs fail startup.
+
+Local agents can start a stdio server. It runs the same composition, polling and live listeners as `serve`, and writes MCP protocol data to stdout (diagnostics go to stderr):
+
+```sh
+claude mcp add --transport stdio contacts -- /absolute/path/to/node24 /Users/johansardar/contacts-mcp/dist/cli.js stdio
+```
+
+For agents on other machines, run one daemon on the Air and connect over authenticated Streamable HTTP:
+
+```sh
+# Set CONTACTS_HTTP_TOKEN in .env first.
+node dist/cli.js serve
+# Local agent, with the same token available in its environment:
+claude mcp add --transport http contacts-http http://127.0.0.1:8787/mcp --header "Authorization: Bearer $CONTACTS_HTTP_TOKEN"
+# Remote agent: substitute the Air's Tailscale Serve URL for the loopback URL.
+claude mcp add --transport http contacts-air https://<air-tailnet-name>/mcp --header "Authorization: Bearer $CONTACTS_HTTP_TOKEN"
+```
+
+Use the Node 24 binary's actual absolute path for stdio and launchd. Other MCP clients use the same command/args for stdio, or the same `/mcp` URL and `Authorization: Bearer <token>` header for HTTP. A stdio process owns its own sync listeners; prefer the daemon HTTP connection when multiple agents use the same accounts. HTTP requires a nonempty token on every request. Keep loopback binding and expose it via Tailscale Serve, or bind explicitly to the Air's tailnet address.
 
 ```sh
 contacts-mcp person create "Alice Smith"
@@ -37,17 +58,27 @@ Names resolve as exact > prefix > token > trigram. Only an exact match scoring a
 
 ## Environment
 
-- `CONTACTS_DB`: SQLite path; default `./data/contacts.db`.
-- `CONTACTS_RATE_LIMIT_IMESSAGE`, `CONTACTS_RATE_LIMIT_INSTAGRAM`, `CONTACTS_RATE_LIMIT_EMAIL`, `CONTACTS_RATE_LIMIT_TIKTOK`: integer per-channel outgoing sends/hour. Instagram defaults to 20; others are unlimited unless configured. Zero blocks sends. Pending sends reserve slots across processes.
+- `CONTACTS_DB`: SQLite path; CLI default `<repo-root>/data/contacts.db`.
+- `CONTACTS_RATE_LIMIT_IMESSAGE`, `CONTACTS_RATE_LIMIT_INSTAGRAM`, `CONTACTS_RATE_LIMIT_EMAIL`, `CONTACTS_RATE_LIMIT_TIKTOK`: integer per-channel outgoing sends/hour. Defaults are iMessage 60, Instagram 20, email 60 and TikTok 10. Zero blocks sends. Pending sends reserve slots across processes.
 
-Environment variables are read from the process; `.env` is ignored and is not auto-loaded. Never commit credentials or the database.
+The CLI loads the repo-root `.env`; process environment values take precedence. [`.env.example`](.env.example) documents every variable. Never commit credentials or the database.
 
 See [ADAPTERS.md](ADAPTERS.md) for the channel contract, reconciliation behavior and spec decisions. The future creator CRM adapter should reuse person links and draft tools for the dashboard approval inbox.
 
 ```sh
 npm run typecheck
 npm test
+npm run build
 ```
+
+## Channel requirements
+
+- **iMessage:** install imsg on the Mac signed into Messages; grant Full Disk Access and Automation → Messages to the responsible Node/daemon executable. `CONTACTS_IMSG_PATH` overrides the binary location. No credential variables are required. Polls every 30 seconds plus `imsg watch` live events.
+- **Instagram:** Beeper Desktop must be running with the intended Instagram account connected. Set `BEEPER_ACCESS_TOKEN` and `BEEPER_INSTAGRAM_ACCOUNT_ID`; `BEEPER_BASE_URL` defaults to `http://localhost:23373`. The composed system requires an explicit account ID so cursors and sends use the same account. Five-minute REST reconciliation plus reconnecting WebSocket live events.
+- **Email:** configure Resend Sending with a verified `CONTACTS_EMAIL_FROM` (normally `outreach@excerlock.com`), `RESEND_API_KEY` for sends and `RESEND_FULL_API_KEY` for receiving and metadata. Configure Resend Receiving and forward the reply mailbox there. Optional `CONTACTS_EMAIL_REPLY_TO` controls the reply address. Two-minute polling; To/CC/BCC and stored RFC Message-ID threading are supported. A first outbound email needs a subject; a reply can inherit one. The composition bridge uses the dispatching outbox ID as the Resend idempotency key, durably stages sent metadata and reconciles through core after dispatch commits, including on restart. A send remains recorded if later metadata reconciliation fails; inspect the outbox before any retry. Provider metadata retrieval failure leaves the RFC ID absent, so replies to that email remain blocked until metadata is reconciled.
+- **TikTok:** set `ZERNIO_API_KEY` and `ZERNIO_TIKTOK_ACCOUNT_ID`; `ZERNIO_BASE_URL` defaults to `https://zernio.com/api`. Connect an eligible TikTok Business account through Zernio with messaging permissions and incoming DMs enabled. Two-minute polling. Requires an existing thread and an inbound within 48 hours; first DMs must be sent manually. The adapter also enforces ten business replies since the latest inbound. Live confirmation is still needed for Zernio's generic conversation endpoint accepting `platform=tiktok` (see adapter notes).
+
+All four channels persist cursors in `sync_state` under their actual account ID (iMessage/email use `default`). Cursors advance only after ingest, and failed passes preserve safe checkpoints. Live events do not advance history cursors. `sync_status` exposes last success, last error and enabled/disabled status. You can run one reconciliation without a daemon with `node dist/cli.js sync [channel]`.
 
 ## iMessage and daemon
 
@@ -65,11 +96,11 @@ HTTP clients must send `Authorization: Bearer <CONTACTS_HTTP_TOKEN>` on every re
 
 Additional environment variables:
 
-- `CONTACTS_CHANNELS`: comma-separated channel IDs; currently only `imessage` is implemented. Empty disables adapters. Unknown IDs fail startup.
+- `CONTACTS_CHANNELS`: comma-separated channel IDs; `imessage`, `instagram`, `email`, `tiktok` are supported. Empty disables adapters. Unknown IDs fail startup.
 - `CONTACTS_IMSG_PATH`: binary path; defaults to `/opt/homebrew/bin/imsg`.
 - `CONTACTS_HTTP_HOST` / `CONTACTS_HTTP_PORT`: defaults `127.0.0.1` / `8787`.
 - `CONTACTS_HTTP_TOKEN`: required, nonempty bearer token for `serve`.
-- `CONTACTS_SYNC_INTERVAL_IMESSAGE_MS`: sync interval after each completed pass; default `30000`. No overlapping polls within one daemon.
+- `CONTACTS_SYNC_INTERVAL_<CHANNEL>_MS`: delay after a completed sync pass. Defaults: iMessage `30000`, Instagram `300000`, email `120000`, TikTok `120000`. No overlapping polls for a channel within one process.
 
 `sync_status` reports cursors, last completed successful sync and most recent error for each channel/account. A sync read failure preserves the last completed backfill page or incremental pass checkpoint. Live events ingest independently and never advance the backfill cursor; periodic sync fills watch gaps. Watch exits restart with exponential backoff capped at 60 seconds. Handles remain unlinked until there is exact identity proof. Routing diagnostics from imsg remain in raw metadata; the adapter uses account `default` because AppleScript cannot select a sending account.
 
@@ -98,7 +129,7 @@ Send accepts text and at most one absolute local attachment path or `file://` UR
 
 ### launchd
 
-Copy [the example](deploy/com.contacts-mcp.daemon.plist.example) to `~/Library/LaunchAgents/com.contacts-mcp.daemon.plist`, replace every absolute-path/user/token placeholder, and build first. launchd does not expand `~` or load `.env`. Keep the installed plist private because it contains the bearer token.
+Copy [the example](deploy/com.contacts-mcp.daemon.plist.example) to `~/Library/LaunchAgents/com.contacts-mcp.daemon.plist`, replace every absolute-path/user/token placeholder, and build first. launchd does not expand `~`; the CLI itself loads the repo-root `.env`. Keep the installed plist private because it contains the bearer token.
 
 ```sh
 mkdir -p ~/Library/LaunchAgents ~/Library/Logs/contacts-mcp

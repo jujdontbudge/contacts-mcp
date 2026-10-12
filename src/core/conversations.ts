@@ -98,6 +98,32 @@ export class Conversations {
       return this.s.one<Message>("SELECT * FROM messages WHERE id=?", id)!;
     })();
   }
+  lookupEvent(channel: ChannelId, id: string): IngestEvent | undefined {
+    const matches = this.s.all<Message>(
+      `SELECT * FROM messages WHERE channel=? AND (external_id=? OR json_extract(raw,'$.message_id')=? OR EXISTS (SELECT 1 FROM json_each(raw,'$.headers') WHERE lower(key)='message-id' AND value=?))`,
+      channel,
+      id,
+      id,
+      id,
+    );
+    if (matches.length > 1) throw new Error("Stored Message-ID is ambiguous");
+    const message = matches[0];
+    if (!message?.sender_handle_id) return undefined;
+    const conversation = this.get(message.conversation_id);
+    const participants = this.s.all<{ value_raw: string }>(
+      "SELECT h.value_raw FROM handles h JOIN conversation_participants cp ON cp.handle_id=h.id WHERE cp.conversation_id=?",
+      conversation.id,
+    );
+    return {
+      ...message,
+      account_id: conversation.account_id,
+      conversation_external_id: conversation.external_id,
+      kind: conversation.kind,
+      title: conversation.title ?? undefined,
+      sender: this.handles.get(message.sender_handle_id).value_raw,
+      participants: participants.map((h) => h.value_raw),
+    };
+  }
   upsert(
     channel: ChannelId,
     account: string,
