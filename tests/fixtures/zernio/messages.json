@@ -1,0 +1,7 @@
+{
+  "messages": [
+    {"id":"native-in","conversationId":"thread/opaque:1","platform":"tiktok","accountId":"acct-1","message":"Hello","senderId":"UserCase1","direction":"incoming","createdAt":"2026-10-12T10:00:00Z","futureMessageField":42,"attachments":[{"id":"image1","type":"image","url":"https://cdn.example/photo.png","mimeType":"image/png","filename":"photo.png","previewUrl":"https://cdn.example/preview.png","width":1080}]},
+    {"id":"native-out","message":"Hi Alice","senderId":"BusinessCase1","direction":"outgoing","createdAt":"2026-10-12T11:00:00Z","metadata":{"quotedMessageId":"native-in"}}
+  ],
+  "pagination":{"hasMore":true,"nextCursor":"message-page-2"}
+}

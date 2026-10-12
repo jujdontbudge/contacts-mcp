@@ -1,0 +1,4 @@
+{
+  "messages": [{"id":"native-in-2","message":null,"senderId":"UserCase1","direction":"incoming","createdAt":"2026-10-12T11:00:00Z","attachments":[{"type":"sticker","payload":{"opaque":true}}]}],
+  "pagination":{"hasMore":false,"nextCursor":null}
+}
