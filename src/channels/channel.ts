@@ -49,7 +49,10 @@ export interface Channel {
     replyWindowHours?: number;
   };
   sync(cursor?: string): AsyncIterable<IngestEvent>;
-  live?(onEvent: (e: IngestEvent) => void): () => void;
+  live?(
+    onEvent: (e: IngestEvent) => void,
+    onError?: (error: Error) => void,
+  ): () => void;
   send(
     target: SendTarget,
     content: SendContent,

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.contacts-mcp.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/contacts-mcp/dist/cli.js</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/TO/contacts-mcp</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CONTACTS_DB</key><string>/Users/YOUR_USER/contacts-mcp/data/contacts.db</string>
+    <key>CONTACTS_CHANNELS</key><string>imessage</string>
+    <key>CONTACTS_IMSG_PATH</key><string>/opt/homebrew/bin/imsg</string>
+    <key>CONTACTS_HTTP_HOST</key><string>127.0.0.1</string>
+    <key>CONTACTS_HTTP_PORT</key><string>8787</string>
+    <key>CONTACTS_HTTP_TOKEN</key><string>REPLACE_WITH_A_PRIVATE_RANDOM_TOKEN</string>
+    <key>CONTACTS_SYNC_INTERVAL_IMESSAGE_MS</key><string>30000</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/YOUR_USER/Library/Logs/contacts-mcp/stdout.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USER/Library/Logs/contacts-mcp/stderr.log</string>
+</dict>
+</plist>

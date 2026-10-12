@@ -2,13 +2,51 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ContactsCore } from "./core/index.js";
 import { createServer } from "./mcp/server.js";
+import { configuredChannels } from "./channels/registry.js";
+import { startDaemon, syncChannel } from "./daemon.js";
 async function main(): Promise<void> {
   const [command, action, ...args] = process.argv.slice(2);
-  if (command === "serve" || command === "sync") {
-    console.log("phase 3");
+  const registry = await configuredChannels();
+  const core = new ContactsCore({ registry });
+  if (command === "serve") {
+    try {
+      const daemon = await startDaemon(core, registry);
+      let closing = false;
+      const close = async () => {
+        if (closing) return;
+        closing = true;
+        await daemon.close();
+        core.close();
+      };
+      process.once("SIGINT", () => {
+        void close();
+      });
+      process.once("SIGTERM", () => {
+        void close();
+      });
+      console.error(
+        `contacts-mcp HTTP listening: ${JSON.stringify(daemon.address)} /mcp`,
+      );
+    } catch (error) {
+      core.close();
+      throw error;
+    }
     return;
   }
-  const core = new ContactsCore();
+  if (command === "sync") {
+    try {
+      const channels = action
+        ? [registry.get(action as Parameters<typeof registry.get>[0])]
+        : registry.list();
+      if (!channels.length)
+        throw new Error("No channels enabled; set CONTACTS_CHANNELS");
+      for (const channel of channels) await syncChannel(core, channel);
+      console.log(JSON.stringify(core.syncStatus(), null, 2));
+    } finally {
+      core.close();
+    }
+    return;
+  }
   if (command === "stdio") {
     const server = createServer(core);
     const close = async () => {

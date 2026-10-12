@@ -76,8 +76,50 @@ export class ContactsCore {
       return message;
     })();
   }
+  ensureSyncState(channel: ChannelId, account = "default"): void {
+    this.store.run(
+      "INSERT OR IGNORE INTO sync_state(channel,account_id) VALUES (?,?)",
+      channel,
+      account,
+    );
+  }
+  ingestSynced(event: IngestEvent, cursor: string | null): void {
+    this.store.db.transaction(() => {
+      this.ingest(event);
+      this.ensureSyncState(event.channel, event.account_id);
+      this.store.run(
+        "UPDATE sync_state SET cursor=? WHERE channel=? AND account_id=?",
+        cursor,
+        event.channel,
+        event.account_id,
+      );
+    })();
+  }
+  recordSync(
+    channel: ChannelId,
+    account: string,
+    cursor: string | null,
+    error: string | null,
+  ): void {
+    this.ensureSyncState(channel, account);
+    this.store.run(
+      "UPDATE sync_state SET cursor=COALESCE(?,cursor),last_ok_at=CASE WHEN ? IS NULL THEN ? ELSE last_ok_at END,last_error=? WHERE channel=? AND account_id=?",
+      cursor,
+      error,
+      this.store.now(),
+      error,
+      channel,
+      account,
+    );
+  }
   syncStatus() {
-    return this.store.all("SELECT * FROM sync_state");
+    return this.store.all<{
+      channel: ChannelId;
+      account_id: string;
+      cursor: string | null;
+      last_ok_at: string | null;
+      last_error: string | null;
+    }>("SELECT * FROM sync_state");
   }
   close(): void {
     this.store.db.close();

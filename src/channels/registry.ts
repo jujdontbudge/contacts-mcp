@@ -23,3 +23,30 @@ export class ChannelRegistry {
     return [...this.channels.values()];
   }
 }
+
+export async function configuredChannels(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ChannelRegistry> {
+  const ids = [
+    ...new Set(
+      (env.CONTACTS_CHANNELS ?? "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ];
+  const registry = new ChannelRegistry();
+  for (const id of ids) {
+    if (id !== "imessage")
+      throw new Error(`Unsupported configured channel: ${id}`);
+    const { IMessageChannel, ProcessImsgRunner } =
+      await import("./imessage.js");
+    registry.register(
+      new IMessageChannel({
+        runner: new ProcessImsgRunner(env.CONTACTS_IMSG_PATH),
+        onLiveError: (error) => console.error(error.message),
+      }),
+    );
+  }
+  return registry;
+}

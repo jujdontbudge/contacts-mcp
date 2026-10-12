@@ -262,7 +262,7 @@ export function tools(core: ContactsCore) {
     },
     sync_status: {
       description:
-        "Read per-channel/account sync cursors, last successful sync and errors. Phase 1 does not run sync jobs.",
+        "Read per-channel/account sync cursors, last successful sync and errors. The daemon and sync command update this state.",
       schema: z.object({}),
       call: () => core.syncStatus(),
     },

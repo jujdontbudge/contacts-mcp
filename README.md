@@ -1,6 +1,6 @@
 # contacts-mcp
 
-One local source of person IDs, channel handles and conversations for AI agents. Phase 1 provides SQLite identity, resolution, audited handle edits, an authorized outbox and all MCP tools. No real channel adapters are included; the fake adapter is only for offline tests. `serve` and `sync` print `phase 3`.
+One local source of person IDs, channel handles and conversations for AI agents. Provides SQLite identity, resolution, audited handle edits, an authorized outbox, all MCP tools, an imsg-backed iMessage adapter and a daemon with authenticated HTTP. The fake adapter is only for offline tests.
 
 ## Install
 
@@ -33,7 +33,7 @@ Run these commands through the installed bin, or `node dist/cli.js …` from thi
 - Outbox: `send_message`, `list_drafts`, `approve_draft`, `reject_draft`.
 - Permissions/status: `add_send_rule`, `list_send_rules`, `sync_status`.
 
-Names resolve as exact > prefix > token > trigram. Only an exact match scoring at least 0.95 with at least a 0.2 margin is sendable; tools require selecting a person ID for ambiguous results. Sending defaults to a draft. Direct sends need `authorized_by` and `reason`, or a matching standing permission. Approval rechecks identity, channel capability, reply window and rate limits. No adapter is registered in the CLI yet, so send/approval returns “Channel unavailable” until later phases supply adapters.
+Names resolve as exact > prefix > token > trigram. Only an exact match scoring at least 0.95 with at least a 0.2 margin is sendable; tools require selecting a person ID for ambiguous results. Sending defaults to a draft. Direct sends need `authorized_by` and `reason`, or a matching standing permission. Approval rechecks identity, channel capability, reply window and rate limits. Set `CONTACTS_CHANNELS=imessage` to enable the real adapter in every CLI mode, including stdio. Sending is never enabled by default.
 
 ## Environment
 
@@ -48,3 +48,55 @@ See [ADAPTERS.md](ADAPTERS.md) for the channel contract, reconciliation behavior
 npm run typecheck
 npm test
 ```
+
+## iMessage and daemon
+
+Install [imsg](https://github.com/openclaw/imsg) (adapter checked against v0.16.0) and grant **Full Disk Access** and **Automation → Messages** to the exact **node binary running the daemon** in System Settings → Privacy & Security. Parent-process TCC grants can vary; if launchd still reports authorization denied, check the imsg permissions guide and grant the responsible executable. Restart the daemon after granting access. Agents should prefer the HTTP endpoint so only the daemon needs these permissions; an agent using the enabled stdio adapter to send also needs permissions.
+
+```sh
+export CONTACTS_CHANNELS=imessage
+export CONTACTS_DB=/absolute/path/to/contacts-mcp/data/contacts.db
+export CONTACTS_HTTP_TOKEN='your-private-random-token'
+node dist/cli.js sync imessage  # one backfill/reconcile, then exit
+node dist/cli.js serve          # sync + watch + MCP at http://127.0.0.1:8787/mcp
+```
+
+HTTP clients must send `Authorization: Bearer <CONTACTS_HTTP_TOKEN>` on every request. The endpoint uses the SDK's stateless Streamable HTTP transport and the same 21 tools as stdio. Keep loopback binding for local use; use Tailscale Serve to expose it on the tailnet, or explicitly bind `CONTACTS_HTTP_HOST` to the machine's tailnet address. Do not expose it on a public interface.
+
+Additional environment variables:
+
+- `CONTACTS_CHANNELS`: comma-separated channel IDs; currently only `imessage` is implemented. Empty disables adapters. Unknown IDs fail startup.
+- `CONTACTS_IMSG_PATH`: binary path; defaults to `/opt/homebrew/bin/imsg`.
+- `CONTACTS_HTTP_HOST` / `CONTACTS_HTTP_PORT`: defaults `127.0.0.1` / `8787`.
+- `CONTACTS_HTTP_TOKEN`: required, nonempty bearer token for `serve`.
+- `CONTACTS_SYNC_INTERVAL_IMESSAGE_MS`: sync interval after each completed pass; default `30000`. No overlapping polls within one daemon.
+
+`sync_status` reports cursors, last completed successful sync and most recent error for each channel/account. A sync read failure preserves the checkpoint. Live events ingest independently and never advance the backfill cursor; periodic sync fills watch gaps. Watch exits restart with exponential backoff capped at 60 seconds. Handles remain unlinked until there is exact identity proof. Routing diagnostics from imsg remain in raw metadata; the adapter uses account `default` because AppleScript cannot select a sending account.
+
+The adapter executes these commands without a shell:
+
+```text
+imsg chats --limit 2147483647 --json
+imsg history --chat-id <rowid> --limit 2147483647 --attachments --json
+imsg watch --attachments --json
+imsg send --to <normalized-handle> --text <text> --service imessage --json [--file <absolute-path>]
+imsg send --chat-identifier <chat.identifier> --text <text> --service imessage --json [--file <absolute-path>]
+```
+
+History has no rowid pagination flag. Each sync first scans all chats/history to capture a rowid cutoff, then scans again up to that cutoff, sorts new messages globally by rowid and atomically checkpoints each ingested message. The two passes prevent a new message in an already-scanned chat being skipped by a later chat’s cursor. This favors complete resumability over scan cost; very large histories need memory/time validation. Saved rowid cursors must be reset if the underlying Messages database is restored/replaced. Message GUIDs deduplicate history and live copies; attachment metadata is retained without opening or copying attachment files. Some self-sent rows have no sender: they use the routed caller ID if present, otherwise `self@contacts-mcp.invalid`; missing inbound senders use a per-row unlinked placeholder. These placeholders are evidence gaps, not discovered people.
+
+Send accepts text and at most one absolute local attachment path or `file://` URL; remote attachment URLs, subjects, email routing and inline replies are rejected. Direct sends route by normalized phone/email, group sends resolve the stored portable chat GUID to its exact `chat.identifier`. The adapter takes a pre-send snapshot, sends once, then polls history for a new outgoing row (matching the returned GUID when available). Timeout or an error after the mutation reports **uncertain; do not retry automatically**. Core retains a failed outbox entry with that diagnostic for manual reconciliation. History confirmation proves Messages recorded the outgoing row, not a recipient delivery/read receipt.
+
+### launchd
+
+Copy [the example](deploy/com.contacts-mcp.daemon.plist.example) to `~/Library/LaunchAgents/com.contacts-mcp.daemon.plist`, replace every absolute-path/user/token placeholder, and build first. launchd does not expand `~` or load `.env`. Keep the installed plist private because it contains the bearer token.
+
+```sh
+mkdir -p ~/Library/LaunchAgents ~/Library/Logs/contacts-mcp
+chmod 600 ~/Library/LaunchAgents/com.contacts-mcp.daemon.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.contacts-mcp.daemon.plist
+# Stop:
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.contacts-mcp.daemon.plist
+```
+
+No live Messages reads/sends are part of the offline tests. After permissions are granted, validate initial/repeated backfill, group participants/identifiers, a watch reconnect with poll reconciliation, and an explicitly authorized message to the owner (including confirmation and no duplicate stored copy).

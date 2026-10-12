@@ -303,26 +303,42 @@ export class OutboxService {
         conversation.id,
         target.handle_id,
       );
-      const messageId = this.s.id("m");
-      this.s.run(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        messageId,
-        conversation.id,
+      const existing = this.s.one<{
+        id: string;
+        direction: string;
+        conversation_id: string;
+      }>(
+        "SELECT id,direction,conversation_id FROM messages WHERE channel=? AND external_id=?",
         target.channel,
         sent.externalId,
-        "out",
-        null,
-        this.s.now(),
-        o.payload.text,
-        o.payload.subject ?? null,
-        JSON.stringify(o.payload.email_to ?? []),
-        JSON.stringify(o.payload.email_cc ?? []),
-        JSON.stringify(o.payload.email_bcc ?? []),
-        JSON.stringify(o.payload.attachments ?? []),
-        o.payload.reply_to_external_id ?? null,
-        JSON.stringify({ source: "outbox", outbox_id: id }),
-        this.s.now(),
       );
+      if (
+        existing &&
+        (existing.direction !== "out" ||
+          existing.conversation_id !== conversation.id)
+      )
+        throw new Error("Confirmed send conflicts with ingested message");
+      const messageId = existing?.id ?? this.s.id("m");
+      if (!existing)
+        this.s.run(
+          "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          messageId,
+          conversation.id,
+          target.channel,
+          sent.externalId,
+          "out",
+          null,
+          this.s.now(),
+          o.payload.text,
+          o.payload.subject ?? null,
+          JSON.stringify(o.payload.email_to ?? []),
+          JSON.stringify(o.payload.email_cc ?? []),
+          JSON.stringify(o.payload.email_bcc ?? []),
+          JSON.stringify(o.payload.attachments ?? []),
+          o.payload.reply_to_external_id ?? null,
+          JSON.stringify({ source: "outbox", outbox_id: id }),
+          this.s.now(),
+        );
       this.s.run(
         "UPDATE outbox SET status='sent',conversation_id=?,sent_message_id=? WHERE id=?",
         conversation.id,

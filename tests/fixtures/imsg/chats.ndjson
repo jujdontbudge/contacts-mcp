@@ -1,0 +1,2 @@
+{"id":1,"name":"Alice","display_name":"","identifier":"+14155551212","guid":"iMessage;-;+14155551212","service":"iMessage","last_message_at":"2026-10-12T12:00:00Z","is_group":false,"participants":["+14155551212"],"account_id":"E:owner@example.com"}
+{"id":2,"name":"Friends","display_name":"Friends","identifier":"chat123","guid":"iMessage;+;chat123","service":"iMessage","last_message_at":"2026-10-12T12:00:00Z","is_group":true,"participants":["(415) 555-1212","BOB@EXAMPLE.COM"]}
