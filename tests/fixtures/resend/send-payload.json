@@ -1,0 +1,14 @@
+{
+  "from": "ExcerLock <outreach@excerlock.com>",
+  "to": ["zoey@example.com", "other@example.com"],
+  "cc": ["manager@example.com"],
+  "bcc": ["private@example.com"],
+  "subject": "Re: Collaboration",
+  "text": "Hello",
+  "html": "<p>Hello</p>",
+  "reply_to": "replies@excerlock.com",
+  "headers": {
+    "In-Reply-To": "<second@excerlock.com>",
+    "References": "<root@example.com> <second@excerlock.com>"
+  }
+}
