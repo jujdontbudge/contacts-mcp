@@ -527,3 +527,34 @@ it("allows rejecting a draft after its handle is unlinked", async () => {
   expect(result.person.id).toBe(person.id);
   expect(result.handle.person_id).toBeNull();
 });
+describe("group safety (live-test regression)", () => {
+  it("never targets a group chat implicitly, even when it is the most recent conversation", async () => {
+    const { core, person, handle, event } = setup("imessage");
+    core.ingest(event({ external_id: "dm1", conversation_external_id: "dm-thread", kind: "direct", participants: [handle.value_raw] }));
+    core.ingest(event({ external_id: "g1", conversation_external_id: "family-chat", kind: "group", participants: [handle.value_raw, "+13125550999"], sent_at: "2026-10-12T12:30:00.000Z" }));
+    for (const input of [{ person_id: person.id }, { person_id: person.id, handle_id: handle.id }]) {
+      const draft = await core.outbox.send({ ...input, channel: "imessage", text: "hi", created_by: "agent" });
+      const conv = core.conversations.get(draft.conversation_id!);
+      expect(conv.kind).toBe("direct");
+      expect(conv.external_id).toBe("dm-thread");
+    }
+  });
+  it("starts a new direct message instead of reusing a group when no 1:1 exists", async () => {
+    const { core, person, handle, event } = setup("imessage");
+    core.ingest(event({ external_id: "g1", conversation_external_id: "family-chat", kind: "group", participants: [handle.value_raw, "+13125550999"] }));
+    const draft = await core.outbox.send({ person_id: person.id, channel: "imessage", text: "hi", created_by: "agent" });
+    expect(draft.conversation_id ?? null).toBeNull();
+    expect(draft.handle_id).toBe(handle.id);
+  });
+});
+describe("self handles (live-test regression)", () => {
+  it("does not add our own sending account as a participant of outgoing messages", async () => {
+    const { core, person, handle, event } = setup("imessage");
+    // Owner's own number also exists as a person handle (e.g. the owner as a contact).
+    core.ingest(event({ external_id: "o1", conversation_external_id: "any;-;+13125550999", kind: "direct", direction: "out", sender: handle.value_raw, participants: ["+13125550999"] }));
+    const convs = core.conversations.list(person.id, "imessage");
+    expect(convs.map((c) => c.external_id)).not.toContain("any;-;+13125550999");
+    const draft = await core.outbox.send({ person_id: person.id, channel: "imessage", text: "hi", created_by: "agent" });
+    expect(draft.conversation_id ?? null).toBeNull();
+  });
+});

@@ -64,16 +64,18 @@ export class OutboxService {
     if (!conversation) {
       conversation = this.conversations
         .list(personId, channel)
+        // Never pick a group implicitly: messaging a group needs an explicit conversation_id.
         .find(
           (c) =>
-            !explicit ||
+            c.kind === "direct" &&
+            (!explicit ||
             (c.channel === explicit.channel &&
               c.account_id === explicit.account_id &&
               !!this.s.one(
                 "SELECT 1 FROM conversation_participants WHERE conversation_id=? AND handle_id=?",
                 c.id,
                 explicit.id,
-              )),
+              ))),
         );
       channel ??= conversation?.channel;
     }

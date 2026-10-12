@@ -23,8 +23,10 @@ export class Conversations {
         event.kind ?? "direct",
         event.title,
       );
+      // On outgoing messages the sender is our own account, never a participant
+      // we could message; adding it would make every chat look like a chat with us.
       for (const h of [
-        sender,
+        ...(event.direction === "out" ? [] : [sender]),
         ...(event.participants ?? []).map((p) =>
           this.handles.ensure(event.channel, event.account_id, p),
         ),

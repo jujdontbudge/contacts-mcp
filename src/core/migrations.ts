@@ -17,4 +17,7 @@ CREATE INDEX outbox_rate ON outbox(channel,status,decided_at);
 `,
   `CREATE TABLE staged_outgoing(outbox_id TEXT PRIMARY KEY REFERENCES outbox(id), payload TEXT NOT NULL);`,
   `CREATE TABLE channel_secrets(channel TEXT NOT NULL, account_id TEXT NOT NULL, access_token TEXT NOT NULL, refreshed_at TEXT NOT NULL, PRIMARY KEY(channel,account_id));`,
+  // Repair: remove our own sending accounts from conversation participants (they were
+  // added as the sender of outgoing messages), except in a chat with ourselves.
+  `DELETE FROM conversation_participants WHERE handle_id IN (SELECT DISTINCT sender_handle_id FROM messages WHERE direction='out' AND sender_handle_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM conversations c JOIN handles h ON h.id=conversation_participants.handle_id WHERE c.id=conversation_participants.conversation_id AND instr(c.external_id, h.value_normalized) > 0);`,
 ];
