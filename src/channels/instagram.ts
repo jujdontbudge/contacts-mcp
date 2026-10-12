@@ -225,29 +225,55 @@ export function createInstagramChannel(
       if (target.conversationExternalId)
         chat = await fullChat(target.conversationExternalId);
       else {
-        let items: User[];
-        try {
-          ({ items } = await client.accounts.contacts.search(
-            self.accountID,
-            { query: `@${requested}` },
-            { timeout: 180_000, maxRetries: 0 },
-          ));
-        } catch {
-          throw new Error(
-            "Instagram contact lookup failed or timed out (180s); verify Beeper connectivity and retry lookup",
-          );
+        // Prefer an existing direct chat with this username: Beeper's contact
+        // search can hang for minutes, while chats opened in Beeper are instant.
+        let existing: Chat | undefined;
+        let scanned = 0;
+        for await (const c of client.chats.list({
+          accountIDs: [self.accountID],
+        } as ChatListParams)) {
+          if (++scanned > 300) break;
+          if (c.type !== "single") continue;
+          const full = await fullChat(c.id);
+          if (
+            full.participants.items.some(
+              (u) => !u.isSelf && !!u.username && username(u) === requested,
+            )
+          ) {
+            existing = full;
+            break;
+          }
         }
-        const matches = items.filter(
-          (u) => u.username && username(u) === requested && !u.isSelf,
-        );
-        if (matches.length !== 1 || !matches[0].id || matches[0].cannotMessage)
-          throw new Error(
-            "Instagram contact lookup requires one messageable exact username match",
+        if (existing) chat = existing;
+        else {
+          let items: User[];
+          try {
+            ({ items } = await client.accounts.contacts.search(
+              self.accountID,
+              { query: `@${requested}` },
+              { timeout: 180_000, maxRetries: 0 },
+            ));
+          } catch {
+            throw new Error(
+              "Instagram contact lookup failed or timed out (180s); verify Beeper connectivity and retry lookup",
+            );
+          }
+          const matches = items.filter(
+            (u) => u.username && username(u) === requested && !u.isSelf,
           );
-        chat = await client.chats.start({
-          accountID: self.accountID,
-          user: { id: matches[0].id },
-        });
+          if (
+            matches.length !== 1 ||
+            !matches[0].id ||
+            matches[0].cannotMessage
+          )
+            throw new Error(
+              "Instagram contact lookup requires one messageable exact username match",
+            );
+          chat = await client.chats.start({
+            accountID: self.accountID,
+            user: { id: matches[0].id },
+          });
+        }
       }
       if (
         chat.accountID !== self.accountID ||
@@ -272,6 +298,7 @@ export function createInstagramChannel(
             "Resolved Instagram recipient mismatch or cannotMessage",
           );
       }
+      const sendStartedAt = Date.now();
       const sent = await client.messages.send(chat.id, {
         text: content.text,
         replyToMessageID: content.reply_to_external_id
@@ -291,8 +318,26 @@ export function createInstagramChannel(
             chatID: sent.chatID,
           });
         } catch (error) {
-          if (error instanceof BeeperDesktop.APIError && error.status === 404)
+          if (error instanceof BeeperDesktop.APIError && error.status === 404) {
+            // Beeper swaps the pending ID for the network's final ID once delivered,
+            // after which the pending ID 404s. Find our message in the chat instead.
+            let scanned = 0;
+            for await (const m of client.messages.list(chat.id)) {
+              if (++scanned > 20) break;
+              if (
+                m.isSender &&
+                m.text === content.text &&
+                Date.parse(m.timestamp) >= sendStartedAt - 60_000 &&
+                m.sendStatus?.status !== "FAIL_PERMANENT" &&
+                m.sendStatus?.status !== "FAIL_RETRIABLE"
+              )
+                return {
+                  externalId: external(chat.id, m.id),
+                  conversationExternalId: chat.id,
+                };
+            }
             continue;
+          }
           throw error;
         }
         if (message.chatID !== chat.id || message.accountID !== self.accountID)
@@ -304,9 +349,12 @@ export function createInstagramChannel(
           throw new Error(
             "Instagram send failed; reconcile manually before retrying",
           );
+        // Beeper omits sendStatus once a message is delivered: a final network ID
+        // (different from the pending one) without a failure status means sent.
         if (
-          message.sendStatus?.status === "SUCCESS" &&
-          message.id !== sent.pendingMessageID
+          message.id !== sent.pendingMessageID &&
+          (message.sendStatus == null ||
+            message.sendStatus.status === "SUCCESS")
         )
           return {
             externalId: external(chat.id, message.id),

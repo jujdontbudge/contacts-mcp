@@ -9,7 +9,7 @@ const client = new Client({ name: 'mcp-call', version: '1.0.0' });
 await client.connect(transport);
 const [tool, args] = process.argv.slice(2);
 if (tool === '--list') { const t = await client.listTools(); for (const x of t.tools) console.log(x.name, JSON.stringify(x.inputSchema?.properties ? Object.keys(x.inputSchema.properties) : [])); }
-else { const r = await client.callTool({ name: tool, arguments: args ? JSON.parse(args) : {} });
+else { const r = await client.callTool({ name: tool, arguments: args ? JSON.parse(args) : {} }, undefined, { timeout: 300000 });
   const txt = (r.content || []).map(c => c.text).join('\n');
   let out = txt; try { const d = JSON.parse(txt); const strip = o => { if (Array.isArray(o)) return o.map(strip); if (o && typeof o === 'object') { const c = {}; for (const [k, v] of Object.entries(o)) if (k !== 'raw') c[k] = strip(v); return c; } return o; }; out = JSON.stringify(strip(d)); } catch {}
   console.log((r.isError ? 'ERROR ' : '') + out.slice(0, Number(process.env.MAX || 1500))); }

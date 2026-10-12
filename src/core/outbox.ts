@@ -190,7 +190,16 @@ export class OutboxService {
       email_cc,
       email_bcc,
       attachments,
-      reply_to_external_id,
+      // An email into an existing thread replies to that thread's latest message,
+      // so headers and subject keep it in the same thread for the recipient.
+      reply_to_external_id:
+        reply_to_external_id ??
+        (target.channel === "email" && target.conversation_id
+          ? this.s.one<{ external_id: string }>(
+              "SELECT external_id FROM messages WHERE conversation_id=? ORDER BY sent_at DESC,rowid DESC LIMIT 1",
+              target.conversation_id,
+            )?.external_id
+          : undefined),
       kind,
       metadata,
     };

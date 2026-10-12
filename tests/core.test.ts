@@ -73,8 +73,9 @@ describe("identity and resolution", () => {
   });
   it("requires selection for duplicate exact, prefix, token, fuzzy and missing results", () => {
     const { core } = setup();
-    for (const q of ["Alice", "Smith", "Alic Smth", "unknown"])
+    for (const q of ["Alice", "Smith", "Alic Smth"])
       expect(core.resolver.find(q).status).toBe("ambiguous");
+    expect(core.resolver.find("unknown").status).toBe("not_found");
     core.identity.create({ display_name: "Alice Smith" });
     const r = core.resolver.find("Alice Smith");
     expect(r.sendable).toBe(false);
@@ -556,5 +557,23 @@ describe("self handles (live-test regression)", () => {
     expect(convs.map((c) => c.external_id)).not.toContain("any;-;+13125550999");
     const draft = await core.outbox.send({ person_id: person.id, channel: "imessage", text: "hi", created_by: "agent" });
     expect(draft.conversation_id ?? null).toBeNull();
+  });
+});
+describe("email thread replies (live-test regression)", () => {
+  it("replies to the latest message of an existing email thread by default", async () => {
+    const { core, person, event } = setup("email");
+    core.ingest(event({ external_id: "<m1@x>", conversation_external_id: "t1", subject: "Hello" }));
+    core.ingest(event({ external_id: "<m2@x>", conversation_external_id: "t1", subject: "Re: Hello", sent_at: "2026-10-12T12:05:00.000Z" }));
+    const conv = core.conversations.list(person.id, "email")[0];
+    const draft = await core.outbox.send({ conversation_id: conv.id, text: "reply", created_by: "agent" });
+    expect(draft.payload.reply_to_external_id).toBe("<m2@x>");
+  });
+});
+describe("resolver noise (live-test regression)", () => {
+  it("reports not_found for an unrelated name instead of weak fuzzy candidates", () => {
+    const { core } = setup();
+    const r = core.resolver.find("nobody-xyz");
+    expect(r.status).toBe("not_found");
+    expect(r.candidates).toEqual([]);
   });
 });

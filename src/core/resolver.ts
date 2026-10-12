@@ -66,13 +66,18 @@ export class Resolver {
           last_channel: last_message?.channel ?? null,
         };
       })
-      .filter((p) => p.score > 0)
+      // Drop weak fuzzy noise so an unknown name reports not_found instead of random people.
+      .filter((p) => p.score >= 0.2)
       .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
     const top = candidates[0];
     const margin = top ? top.score - (candidates[1]?.score ?? 0) : 0;
     const sendable = !!top && top.score >= 0.95 && margin >= 0.2;
     return {
-      status: sendable ? ("resolved" as const) : ("ambiguous" as const),
+      status: sendable
+        ? ("resolved" as const)
+        : candidates.length
+          ? ("ambiguous" as const)
+          : ("not_found" as const),
       sendable,
       person_id: sendable ? top.id : null,
       candidates,

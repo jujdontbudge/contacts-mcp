@@ -84,6 +84,7 @@ class Socket extends EventEmitter {
 afterEach(() => vi.useRealTimers());
 it("resolves exact usernames through contacts before starting a DM and refuses fuzzy matches", async () => {
   const { channel, client } = setup();
+    client.chats.list.mockImplementation(() => iterable([group])); // no existing direct chat: exercise the start path
   await channel.send(target, { text: "hello" });
   expect(client.accounts.contacts.search).toHaveBeenCalledWith(
     "ig",
@@ -234,6 +235,7 @@ describe("Instagram Beeper adapter", () => {
   });
   it("starts an exact DM, then sends and resolves the canonical message ID", async () => {
     const { channel, client } = setup();
+    client.chats.list.mockImplementation(() => iterable([group])); // no existing direct chat: exercise the start path
     expect(await channel.send(target, { text: "hi" })).toEqual({
       externalId: '["direct","sent"]',
       conversationExternalId: "direct",
@@ -252,6 +254,7 @@ describe("Instagram Beeper adapter", () => {
     { username: undefined },
   ])("refuses unsafe resolved users %j before sending", async (user) => {
     const { channel, client } = setup();
+    client.chats.list.mockImplementation(() => iterable([group])); // no existing direct chat: exercise the start path
     client.chats.start.mockResolvedValue({
       ...direct,
       participants: {
@@ -281,6 +284,7 @@ describe("Instagram Beeper adapter", () => {
   });
   it("rejects wrong accounts, read-only/incomplete chats, and unsupported content before writes", async () => {
     const { channel, client } = setup();
+    client.chats.list.mockImplementation(() => iterable([group])); // no existing direct chat: exercise the start path
     await expect(
       channel.send({ ...target, account_id: "other" }, { text: "hi" }),
     ).rejects.toThrow("account mismatch");
@@ -401,5 +405,38 @@ describe("Instagram Beeper adapter", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(sockets).toHaveLength(3);
     expect(sockets[2].close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("existing chat reuse (live-test regression)", () => {
+  it("reuses an existing direct chat with the username instead of the slow contact search", async () => {
+    const { channel, client } = setup();
+    await channel.send(target, { text: "hi" });
+    expect(client.accounts.contacts.search).not.toHaveBeenCalled();
+    expect(client.chats.start).not.toHaveBeenCalled();
+    expect(client.messages.send).toHaveBeenCalledWith("direct", expect.anything());
+  });
+});
+describe("delivery confirmation after pending ID is replaced (live-test regression)", () => {
+  it("confirms by finding our delivered message in the chat when the pending ID 404s", async () => {
+    const { client } = setup();
+    client.messages.retrieve.mockImplementation(async () => {
+      throw new BeeperDesktop.NotFoundError(404, undefined, "not found", new Headers());
+    });
+    const delivered = { id: "final-3", chatID: "direct", accountID: "ig", isSender: true, text: "hello there", timestamp: new Date().toISOString() } as unknown as Message;
+    client.messages.list.mockImplementation(() => iterable([delivered]));
+    const channel = createInstagramChannel({ client, accountID: "ig", confirmIntervalMs: 0, confirmAttempts: 2 });
+    expect(await channel.send(target, { text: "hello there" })).toEqual({
+      externalId: '["direct","final-3"]',
+      conversationExternalId: "direct",
+    });
+  });
+});
+describe("delivery confirmation without sendStatus (live-test regression)", () => {
+  it("treats a final ID with no sendStatus as delivered", async () => {
+    const { client } = setup();
+    client.messages.retrieve.mockImplementation(async () => ({ id: "4", chatID: "direct", accountID: "ig", isSender: true, text: "hi", timestamp: new Date().toISOString() }) as unknown as Message);
+    const channel = createInstagramChannel({ client, accountID: "ig", confirmIntervalMs: 0, confirmAttempts: 2 });
+    expect(await channel.send(target, { text: "hi" })).toEqual({ externalId: '["direct","4"]', conversationExternalId: "direct" });
   });
 });

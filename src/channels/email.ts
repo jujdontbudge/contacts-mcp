@@ -315,7 +315,13 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
           ...(parentId ? [parentId] : []),
         ]),
       ];
-      const subject = content.subject ?? parent?.subject;
+      const subject =
+        content.subject ??
+        (parent?.subject === undefined
+          ? undefined
+          : /^\s*re\s*:/i.test(parent.subject)
+            ? parent.subject
+            : `Re: ${parent.subject}`);
       if (subject === undefined) throw new Error("Email subject required");
       const headers: Record<string, string> = parentId
         ? { "In-Reply-To": parentId, References: references.join(" ") }
