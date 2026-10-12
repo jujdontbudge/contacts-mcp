@@ -117,7 +117,7 @@ describe("Instagram Beeper adapter", () => {
       account_id: "ig",
       kind: "direct",
       sender: "alice",
-      participants: ["owner", "alice"],
+      participants: ["alice"],
       direction: "in",
       sent_at: "2026-10-12T10:00:00.000Z",
       text: "hello",
@@ -135,7 +135,7 @@ describe("Instagram Beeper adapter", () => {
       external_id: '["group","m1"]',
       kind: "group",
       sender: "bob",
-      participants: ["owner", "alice", "bob"],
+      participants: ["alice", "bob"],
       text: "",
     });
     expect(client.chats.retrieve).toHaveBeenCalledWith("group", {

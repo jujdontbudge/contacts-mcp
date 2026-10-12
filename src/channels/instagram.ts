@@ -143,7 +143,14 @@ export function createInstagramChannel(
       conversation_external_id: chat.id,
       kind: chat.type === "group" ? "group" : "direct",
       title: chat.title,
-      participants: [...new Set(chat.participants.items.map(username))],
+      // Our own users (the Beeper login and the IG account) are never participants.
+      participants: [
+        ...new Set(
+          chat.participants.items
+            .filter((u) => !u.isSelf && u.id !== self.user.id)
+            .map(username),
+        ),
+      ],
       sender: username(sender),
       direction:
         message.isSender || message.senderID === self.user.id ? "out" : "in",
