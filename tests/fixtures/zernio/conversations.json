@@ -1,0 +1,8 @@
+{
+  "data": [
+    {"id":"thread/opaque:1","platform":"tiktok","accountId":"acct-1","accountUsername":"excerlock","participantId":"UserCase1","participantUsername":"Alice","participantName":"Alice Smith","futureField":{"keep":true}},
+    {"id":"wrong-account","platform":"tiktok","accountId":"acct-2"},
+    {"id":"wrong-platform","platform":"instagram","accountId":"acct-1"}
+  ],
+  "pagination":{"hasMore":true,"nextCursor":"conversation-page-2"}
+}

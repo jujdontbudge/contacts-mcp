@@ -1,0 +1,1 @@
+{"error":"Platform rejected send","type":"platform_error","code":"platform_api_error","platform":"tiktok","platformError":{"message":"Reply window expired: 48 hours after the user's last message"}}
