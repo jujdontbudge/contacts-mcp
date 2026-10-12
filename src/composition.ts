@@ -45,6 +45,20 @@ export async function createContactsSystem(
         await options.adapters?.instagram?.onCursor?.(cursor);
       },
     },
+    instagramOfficial: {
+      ...options.adapters?.instagramOfficial,
+      clock: options.adapters?.instagramOfficial?.clock ?? options.clock,
+      loadToken: () => core.loadChannelToken("instagram", registry.get("instagram").accountId!),
+      saveToken: token => core.saveChannelToken("instagram", registry.get("instagram").accountId!, token),
+      getLastInboundAt: external => core.lastInboundAt("instagram", registry.get("instagram").accountId!, external),
+    },
+    instagramBoth: {
+      ...options.adapters?.instagramBoth,
+      clock: options.adapters?.instagramBoth?.clock ?? options.clock,
+      getLastInboundAt: target => target.conversationExternalId
+        ? core.lastInboundAt("instagram", target.account_id, target.conversationExternalId)
+        : undefined,
+    },
     email: {
       ...options.adapters?.email,
       clock: options.adapters?.email?.clock ?? options.clock,

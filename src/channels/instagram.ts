@@ -196,6 +196,7 @@ export function createInstagramChannel(
     },
     async send(target, content) {
       if (target.channel !== "instagram") throw new Error("Wrong channel");
+      if (content.metadata?.instagram_tag) throw new Error("HUMAN_AGENT requires the official transport");
       if (
         content.attachments?.length ||
         content.email_cc?.length ||

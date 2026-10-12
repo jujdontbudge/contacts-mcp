@@ -16,4 +16,5 @@ CREATE INDEX handles_person ON handles(person_id);
 CREATE INDEX outbox_rate ON outbox(channel,status,decided_at);
 `,
   `CREATE TABLE staged_outgoing(outbox_id TEXT PRIMARY KEY REFERENCES outbox(id), payload TEXT NOT NULL);`,
+  `CREATE TABLE channel_secrets(channel TEXT NOT NULL, account_id TEXT NOT NULL, access_token TEXT NOT NULL, refreshed_at TEXT NOT NULL, PRIMARY KEY(channel,account_id));`,
 ];

@@ -9,6 +9,7 @@ export interface SendContent {
   attachments?: { url: string; mimeType?: string; name?: string }[];
   reply_to_external_id?: string;
   kind?: string;
+  metadata?: { instagram_tag?: "HUMAN_AGENT" };
 }
 export interface SendTarget {
   person_id: string;
@@ -45,6 +46,8 @@ export interface Channel {
   /** The account whose sync cursor this adapter consumes. */
   accountId?: string;
   getCursor?(): string | undefined;
+  /** Bounded background maintenance, e.g. refresh credentials when due. */
+  maintenance?(): Promise<void>;
   capabilities: {
     startConversation: boolean;
     groups: boolean;

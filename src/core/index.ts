@@ -86,6 +86,25 @@ export class ContactsCore {
       return message;
     })();
   }
+  /** Private credential storage; deliberately excluded from every MCP tool/status response. */
+  loadChannelToken(channel: ChannelId, account: string): { accessToken: string; refreshedAt: string } | undefined {
+    const row = this.store.one<{ access_token: string; refreshed_at: string }>(
+      "SELECT access_token,refreshed_at FROM channel_secrets WHERE channel=? AND account_id=?", channel, account,
+    );
+    return row ? { accessToken: row.access_token, refreshedAt: row.refreshed_at } : undefined;
+  }
+  saveChannelToken(channel: ChannelId, account: string, token: { accessToken: string; refreshedAt: string }): void {
+    this.store.run(
+      "INSERT INTO channel_secrets VALUES (?,?,?,?) ON CONFLICT(channel,account_id) DO UPDATE SET access_token=excluded.access_token,refreshed_at=excluded.refreshed_at",
+      channel, account, token.accessToken, token.refreshedAt,
+    );
+  }
+  lastInboundAt(channel: ChannelId, account: string, external: string): string | undefined {
+    return this.store.one<{ sent_at: string }>(
+      "SELECT m.sent_at FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.channel=? AND c.account_id=? AND c.external_id=? AND m.direction='in' ORDER BY m.sent_at DESC LIMIT 1",
+      channel, account, external,
+    )?.sent_at;
+  }
   ensureSyncState(channel: ChannelId, account = "default"): void {
     this.store.run(
       "INSERT OR IGNORE INTO sync_state(channel,account_id) VALUES (?,?)",

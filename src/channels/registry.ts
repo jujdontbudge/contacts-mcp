@@ -33,6 +33,8 @@ export interface AdapterOptions {
     typeof import("./imessage.js").IMessageChannel
   >[0];
   instagram?: import("./instagram.js").InstagramOptions;
+  instagramOfficial?: import("./instagram-official.js").InstagramOfficialOptions;
+  instagramBoth?: import("./instagram-transport.js").InstagramBothOptions;
   email?: import("./email.js").EmailChannelOptions;
   tiktok?: import("./tiktok.js").TikTokOptions;
 }
@@ -53,10 +55,15 @@ export async function configuredChannels(
   for (const id of ids)
     if (!supported.includes(id as ChannelId))
       throw new Error(`Unsupported configured channel: ${id}`);
+  const instagramTransport = env.CONTACTS_INSTAGRAM_TRANSPORT ?? "beeper";
+  if (!["beeper", "official", "both"].includes(instagramTransport))
+    throw new Error("CONTACTS_INSTAGRAM_TRANSPORT must be beeper, official or both");
   const registry = new ChannelRegistry();
   for (const id of supported) {
     const account =
-      id === "instagram"
+      id === "instagram" && instagramTransport === "official"
+        ? (adapters.instagramOfficial?.accountId ?? (adapters.instagramOfficial?.userId?.trim() || env.IG_USER_ID?.trim() || "official"))
+        : id === "instagram"
         ? (adapters.instagram?.accountID ??
           env.BEEPER_INSTAGRAM_ACCOUNT_ID ??
           "default")
@@ -75,7 +82,7 @@ export async function configuredChannels(
       continue;
     }
     const missing: string[] = [];
-    if (id === "instagram") {
+    if (id === "instagram" && instagramTransport !== "official") {
       if (
         !adapters.instagram?.client &&
         !(adapters.instagram?.accessToken ?? env.BEEPER_ACCESS_TOKEN)?.trim()
@@ -87,6 +94,11 @@ export async function configuredChannels(
         )?.trim()
       )
         missing.push("BEEPER_INSTAGRAM_ACCOUNT_ID");
+    }
+    if (id === "instagram" && instagramTransport !== "beeper") {
+      if (!(adapters.instagramOfficial?.accessToken ?? env.IG_ACCESS_TOKEN)?.trim()) missing.push("IG_ACCESS_TOKEN");
+      if (!(adapters.instagramOfficial?.appSecret ?? env.IG_APP_SECRET)?.trim()) missing.push("IG_APP_SECRET");
+      if (!(adapters.instagramOfficial?.verifyToken ?? env.IG_WEBHOOK_VERIFY_TOKEN)?.trim()) missing.push("IG_WEBHOOK_VERIFY_TOKEN");
     }
     if (id === "email") {
       for (const [name, value] of [
@@ -124,13 +136,33 @@ export async function configuredChannels(
         ...adapters.imessage,
       });
     } else if (id === "instagram") {
-      const { createInstagramChannel } = await import("./instagram.js");
-      channel = createInstagramChannel({
-        accessToken: env.BEEPER_ACCESS_TOKEN,
-        baseURL: env.BEEPER_BASE_URL,
-        accountID: env.BEEPER_INSTAGRAM_ACCOUNT_ID,
-        ...adapters.instagram,
-      });
+      let beeper: Channel | undefined;
+      if (instagramTransport !== "official") {
+        const { createInstagramChannel } = await import("./instagram.js");
+        beeper = createInstagramChannel({
+          accessToken: env.BEEPER_ACCESS_TOKEN,
+          baseURL: env.BEEPER_BASE_URL,
+          accountID: env.BEEPER_INSTAGRAM_ACCOUNT_ID,
+          ...adapters.instagram,
+          ...(instagramTransport === "both" ? { onCursor: undefined } : {}),
+        });
+        beeper.accountId = account;
+      }
+      if (instagramTransport === "beeper") channel = beeper!;
+      else {
+        const { createInstagramOfficialChannel } = await import("./instagram-official.js");
+        const official = createInstagramOfficialChannel({
+          accessToken: env.IG_ACCESS_TOKEN, userId: env.IG_USER_ID,
+          version: env.IG_GRAPH_VERSION, appSecret: env.IG_APP_SECRET,
+          verifyToken: env.IG_WEBHOOK_VERIFY_TOKEN,
+          ...adapters.instagramOfficial, accountId: account,
+        });
+        if (instagramTransport === "official") channel = official;
+        else {
+          const { createInstagramBothChannel } = await import("./instagram-transport.js");
+          channel = createInstagramBothChannel(beeper!, official, adapters.instagramBoth);
+        }
+      }
     } else if (id === "email") {
       const { createEmailChannel } = await import("./email.js");
       if (!adapters.email)

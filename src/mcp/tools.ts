@@ -43,6 +43,7 @@ const content = {
   email_bcc: z.array(z.string().email()).optional(),
   attachments: z.array(attachment).optional(),
   reply_to_external_id: id.optional(),
+  metadata: z.object({ instagram_tag: z.literal("HUMAN_AGENT").optional() }).optional().describe("Explicit human support tag; requires Meta Human Agent approval, never for automated or promotional messages"),
   kind: id.optional().describe("Message category used by standing kind rules"),
 };
 export function tools(core: ContactsCore) {

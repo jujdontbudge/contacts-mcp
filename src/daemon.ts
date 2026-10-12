@@ -79,8 +79,14 @@ export function startSyncLoops(
     core.ensureSyncState(channel.id, channel.accountId);
     const poll = () => {
       if (stopped) return;
-      const task = syncChannel(core, channel)
-        .catch((error) => console.error(`${channel.id} sync: ${String(error)}`))
+      const task = Promise.resolve().then(async () => {
+        await channel.maintenance?.();
+        await syncChannel(core, channel);
+      })
+        .catch((error) => {
+          core.recordSync(channel.id, channel.accountId ?? "default", null, String(error));
+          console.error(`${channel.id} sync: ${String(error)}`);
+        })
         .finally(() => {
           pending.delete(task);
           if (!stopped) {
@@ -160,6 +166,19 @@ export async function startDaemon(
   syncIntervals(registry, options.intervals ?? {}); // Validate before opening the HTTP listener.
   const active = new Set<ReturnType<typeof createServer>>();
   const http = createHTTPServer(async (req, res) => {
+    if (new URL(req.url ?? "/", "http://localhost").pathname === "/webhooks/instagram") {
+      const instagram = registry.list().find(c => c.id === "instagram") as
+        import("./channels/instagram-official.js").InstagramOfficialChannel | undefined;
+      if (!instagram?.handleWebhook) { res.writeHead(404); res.end(); return; }
+      try {
+        await instagram.handleWebhook(req, res, event => { core.ingest(event); });
+      } catch {
+        core.recordSync("instagram", instagram.accountId!, null, "Instagram webhook ingest failed; awaiting retry");
+        if (!res.headersSent) res.writeHead(500);
+        if (!res.writableEnded) res.end();
+      }
+      return;
+    }
     const expected = Buffer.from(`Bearer ${token}`),
       actual = Buffer.from(req.headers.authorization ?? "");
     if (

@@ -144,7 +144,8 @@ export class OutboxService {
       if (
         !last ||
         this.s.clock().getTime() - Date.parse(last.sent_at) >=
-          channel.capabilities.replyWindowHours * 3600000
+          (target.channel === "instagram" && content.metadata?.instagram_tag === "HUMAN_AGENT"
+            ? 168 : channel.capabilities.replyWindowHours) * 3600000
       )
         throw new Error("Reply window is closed");
     }
@@ -170,6 +171,7 @@ export class OutboxService {
       attachments,
       reply_to_external_id,
       kind,
+      metadata,
     } = input;
     const content: SendContent = {
       text,
@@ -180,6 +182,7 @@ export class OutboxService {
       attachments,
       reply_to_external_id,
       kind,
+      metadata,
     };
     if (!text.trim() && !attachments?.length)
       throw new Error("Message must have text or attachments");
