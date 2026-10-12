@@ -95,6 +95,15 @@ export class ContactsCore {
       );
     })();
   }
+  checkpointSync(channel: ChannelId, account: string, cursor: string): void {
+    this.ensureSyncState(channel, account);
+    this.store.run(
+      "UPDATE sync_state SET cursor=? WHERE channel=? AND account_id=?",
+      cursor,
+      channel,
+      account,
+    );
+  }
   recordSync(
     channel: ChannelId,
     account: string,

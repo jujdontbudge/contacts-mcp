@@ -71,21 +71,30 @@ Additional environment variables:
 - `CONTACTS_HTTP_TOKEN`: required, nonempty bearer token for `serve`.
 - `CONTACTS_SYNC_INTERVAL_IMESSAGE_MS`: sync interval after each completed pass; default `30000`. No overlapping polls within one daemon.
 
-`sync_status` reports cursors, last completed successful sync and most recent error for each channel/account. A sync read failure preserves the checkpoint. Live events ingest independently and never advance the backfill cursor; periodic sync fills watch gaps. Watch exits restart with exponential backoff capped at 60 seconds. Handles remain unlinked until there is exact identity proof. Routing diagnostics from imsg remain in raw metadata; the adapter uses account `default` because AppleScript cannot select a sending account.
+`sync_status` reports cursors, last completed successful sync and most recent error for each channel/account. A sync read failure preserves the last completed backfill page or incremental pass checkpoint. Live events ingest independently and never advance the backfill cursor; periodic sync fills watch gaps. Watch exits restart with exponential backoff capped at 60 seconds. Handles remain unlinked until there is exact identity proof. Routing diagnostics from imsg remain in raw metadata; the adapter uses account `default` because AppleScript cannot select a sending account.
 
 The adapter executes these commands without a shell:
 
 ```text
 imsg chats --limit 2147483647 --json
-imsg history --chat-id <rowid> --limit 2147483647 --attachments --json
+# Backfill pages (first page has no --end):
+imsg history --chat-id <rowid> --limit 1000 [--end <page-boundary-ISO>] --attachments --json
+# Timestamp ties at the oldest page boundary (streamed, 2ms window):
+imsg history --chat-id <rowid> --limit 2147483647 --start <boundary-ISO> --end <bucket-end-ISO> --attachments --json
+# Incremental: only chats with last_message_at >= overlap start:
+imsg history --chat-id <rowid> --limit 2147483647 --start <last-sync-minus-10-minutes-ISO> --attachments --json
+# Pre-send snapshot and confirmation (only matching chats):
+imsg history --chat-id <rowid> --limit 100 --start <send-start-minus-1-minute-ISO> --attachments --json
 imsg watch --attachments --json
 imsg send --to <normalized-handle> --text <text> --service imessage --json [--file <absolute-path>]
 imsg send --chat-identifier <chat.identifier> --text <text> --service imessage --json [--file <absolute-path>]
 ```
 
-History has no rowid pagination flag. Each sync first scans all chats/history to capture a rowid cutoff, then scans again up to that cutoff, sorts new messages globally by rowid and atomically checkpoints each ingested message. The two passes prevent a new message in an already-scanned chat being skipped by a later chat’s cursor. This favors complete resumability over scan cost; very large histories need memory/time validation. Saved rowid cursors must be reset if the underlying Messages database is restored/replaced. Message GUIDs deduplicate history and live copies; attachment metadata is retained without opening or copying attachment files. Some self-sent rows have no sender: they use the routed caller ID if present, otherwise `self@contacts-mcp.invalid`; missing inbound senders use a per-row unlinked placeholder. These placeholders are evidence gaps, not discovered people.
+History has no rowid pagination flag. Initial backfill uses 1000-message pages, descending by date, with an exclusive `--end` for older pages. The boundary timestamp bucket is streamed separately so more than 1000 messages sharing a timestamp cannot be skipped; its bounds account for imsg's millisecond timestamp formatting. The adapter buffers at most one page, and streams incremental and boundary output with backpressure (imsg itself prepares each date-window result in memory). Progress is durably checkpointed after a page or chat is fully ingested; an interrupted page is replayed and deduplicated.
 
-Send accepts text and at most one absolute local attachment path or `file://` URL; remote attachment URLs, subjects, email routing and inline replies are rejected. Direct sends route by normalized phone/email, group sends resolve the stored portable chat GUID to its exact `chat.identifier`. The adapter takes a pre-send snapshot, sends once, then polls history for a new outgoing row (matching the returned GUID when available). Timeout or an error after the mutation reports **uncertain; do not retry automatically**. Core retains a failed outbox entry with that diagnostic for manual reconciliation. History confirmation proves Messages recorded the outgoing row, not a recipient delivery/read receipt.
+Versioned JSON cursors contain the maximum observed rowid, last successful scan's **start** time, and backfill progress while applicable. Numeric cursors migrate through one bounded backfill pass, emitting only rowids above the legacy cursor because a numeric cursor provides no safe timestamp to start from. Afterwards, each periodic pass lists chats once, selects chats using `last_message_at` with a ten-minute safety overlap, and streams only that date window. Missing/invalid activity dates include the chat conservatively. The explicit large limit prevents imsg's default 50-message limit from truncating an active window; it never requests an entire chat history in steady state. The timestamp advances only after all selected chats succeed, including empty passes. Overlap events are not filtered by rowid, so a racing lower-rowid insert in an already-scanned chat is recovered on the next pass. The ten-minute overlap covers recent insert races; historical imports dated outside it require a cursor reset/backfill. Saved cursors must also be reset if the underlying Messages database is restored/replaced. Message GUIDs deduplicate history and live copies; attachment metadata is retained without opening or copying attachment files. Some self-sent rows have no sender: they use the routed caller ID if present, otherwise `self@contacts-mcp.invalid`; missing inbound senders use a per-row unlinked placeholder. These placeholders are evidence gaps, not discovered people.
+
+Send accepts text and at most one absolute local attachment path or `file://` URL; remote attachment URLs, subjects, email routing and inline replies are rejected. Direct sends route by normalized phone/email, group sends resolve the stored portable chat GUID to its exact `chat.identifier`. The adapter takes a pre-send snapshot limited to 100 recent messages since one minute before the send begins, sends once, then polls the same bounded history window for a new outgoing row (matching the returned GUID when available). Timeout or an error after the mutation reports **uncertain; do not retry automatically**. Core retains a failed outbox entry with that diagnostic for manual reconciliation. History confirmation proves Messages recorded the outgoing row, not a recipient delivery/read receipt.
 
 ### launchd
 

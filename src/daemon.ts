@@ -17,18 +17,12 @@ export async function syncChannel(
     { cursor: string | null } | undefined;
   let cursor = state?.cursor ?? undefined;
   try {
-    for await (const event of channel.sync(cursor)) {
-      // Ingest and checkpoint are atomic; live never advances the backfill cursor.
-      let nextCursor = cursor;
-      if (channel.id === "imessage") {
-        const rowid = (event.raw as { imsg_rowid?: number } | undefined)
-          ?.imsg_rowid;
-        if (!Number.isSafeInteger(rowid) || Number(rowid) < 1)
-          throw new Error("Missing imsg sync rowid");
-        nextCursor = String(Math.max(Number(cursor ?? 0), rowid!));
-      }
-      core.ingestSynced(event, nextCursor ?? null);
-      cursor = nextCursor;
+    for await (const event of channel.sync(cursor, (next) => {
+      // The adapter checkpoints only after the consumer has ingested its page.
+      core.checkpointSync(channel.id, "default", next);
+      cursor = next;
+    })) {
+      core.ingestSynced(event, cursor ?? null);
     }
     core.recordSync(channel.id, "default", cursor ?? null, null);
   } catch (error) {

@@ -48,7 +48,12 @@ export interface Channel {
     cc: boolean;
     replyWindowHours?: number;
   };
-  sync(cursor?: string): AsyncIterable<IngestEvent>;
+  // An adapter may checkpoint a completed segment after its yielded events
+  // have been consumed. Failed/incomplete segments must remain replayable.
+  sync(
+    cursor?: string,
+    checkpoint?: (cursor: string) => void,
+  ): AsyncIterable<IngestEvent>;
   live?(
     onEvent: (e: IngestEvent) => void,
     onError?: (error: Error) => void,

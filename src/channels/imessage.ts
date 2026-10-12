@@ -35,6 +35,7 @@ export function messageRowid(row: Row): number {
 }
 export interface ImsgRunner {
   run(args: string[], options?: { timeoutMs?: number }): Promise<string>;
+  stream(args: string[]): AsyncIterable<string>;
   watch(
     args: string[],
     onLine: (line: string) => void,
@@ -73,6 +74,47 @@ export class ProcessImsgRunner implements ImsgRunner {
       });
     });
   }
+  async *stream(args: string[]): AsyncIterable<string> {
+    const child = spawn(this.binary, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (data) => {
+      stderr = (stderr + data).slice(-8192);
+    });
+    // Attach exit/error handlers immediately, even while the consumer is paused.
+    const closed = new Promise<Error | undefined>((resolve) => {
+      child.once("error", resolve);
+      child.once("close", (code) =>
+        resolve(
+          code === 0
+            ? undefined
+            : new Error(`imsg ${args[0]} exited ${code}: ${stderr.trim()}`),
+        ),
+      );
+    });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 120_000);
+    child.stdout.setEncoding("utf8");
+    let pending = "";
+    try {
+      // Readable's async iterator applies backpressure; no whole-history buffer.
+      for await (const chunk of child.stdout) {
+        pending += chunk;
+        let newline: number;
+        while ((newline = pending.indexOf("\n")) !== -1) {
+          const line = pending.slice(0, newline);
+          pending = pending.slice(newline + 1);
+          if (line.trim()) yield line;
+        }
+      }
+      if (pending.trim()) yield pending;
+      const error = await closed;
+      if (error) throw error;
+    } finally {
+      clearTimeout(timer);
+      child.kill();
+    }
+  }
   watch(
     args: string[],
     onLine: (line: string) => void,
@@ -107,6 +149,61 @@ export class ProcessImsgRunner implements ImsgRunner {
   }
 }
 const ALL = "2147483647";
+const PAGE = 1000;
+const OVERLAP_MS = 10 * 60_000;
+interface SyncCursor {
+  version: 1;
+  maxRowid: number;
+  lastSync?: string;
+  backfill?: {
+    started: string;
+    completed: number[];
+    chatId?: number;
+    end?: string;
+    legacyRowid: number;
+  };
+}
+function parseCursor(cursor: string | undefined, started: string): SyncCursor {
+  if (cursor === undefined || /^\d+$/.test(cursor)) {
+    const rowid = Number(cursor ?? 0);
+    if (!Number.isSafeInteger(rowid) || rowid < 0)
+      throw new Error("Invalid imsg cursor");
+    return {
+      version: 1,
+      maxRowid: rowid,
+      backfill: { started, completed: [], legacyRowid: rowid },
+    };
+  }
+  let c: SyncCursor;
+  try {
+    c = JSON.parse(cursor);
+  } catch {
+    throw new Error("Invalid imsg cursor");
+  }
+  const validDate = (v: unknown) =>
+    typeof v === "string" && Number.isFinite(Date.parse(v));
+  if (
+    !c ||
+    c.version !== 1 ||
+    !Number.isSafeInteger(c.maxRowid) ||
+    c.maxRowid < 0 ||
+    (c.backfill
+      ? !validDate(c.backfill.started) ||
+        !Array.isArray(c.backfill.completed) ||
+        c.backfill.completed.some(
+          (id) => !Number.isSafeInteger(id) || id < 1,
+        ) ||
+        !Number.isSafeInteger(c.backfill.legacyRowid) ||
+        c.backfill.legacyRowid < 0 ||
+        (c.backfill.chatId !== undefined &&
+          (!Number.isSafeInteger(c.backfill.chatId) ||
+            c.backfill.chatId < 1)) ||
+        (c.backfill.end !== undefined && !validDate(c.backfill.end))
+      : !validDate(c.lastSync))
+  )
+    throw new Error("Invalid imsg cursor");
+  return c;
+}
 export class IMessageChannel implements Channel {
   readonly id = "imessage" as const;
   readonly capabilities = { startConversation: true, groups: true, cc: false };
@@ -205,48 +302,123 @@ export class IMessageChannel implements Channel {
       await this.runner.run(["chats", "--limit", ALL, "--json"], { timeoutMs }),
     );
   }
-  private async history(chat: Row, timeoutMs?: number): Promise<Row[]> {
+  private historyArgs(
+    chat: Row,
+    options: { start?: string; end?: string; limit?: number } = {},
+  ): string[] {
     if (!Number.isSafeInteger(chat.id) || Number(chat.id) < 1)
       throw new Error("Invalid imsg chat rowid");
+    return [
+      "history",
+      "--chat-id",
+      String(chat.id),
+      "--limit",
+      String(options.limit ?? ALL),
+      ...(options.start ? ["--start", options.start] : []),
+      ...(options.end ? ["--end", options.end] : []),
+      "--attachments",
+      "--json",
+    ];
+  }
+  private async history(
+    chat: Row,
+    options: { start?: string; end?: string; limit?: number },
+    timeoutMs?: number,
+  ): Promise<Row[]> {
     return parseImsgJSON(
-      await this.runner.run(
-        [
-          "history",
-          "--chat-id",
-          String(chat.id),
-          "--limit",
-          ALL,
-          "--attachments",
-          "--json",
-        ],
-        { timeoutMs },
-      ),
+      await this.runner.run(this.historyArgs(chat, options), { timeoutMs }),
     );
   }
-  async *sync(cursor?: string): AsyncIterable<IngestEvent> {
-    if (cursor !== undefined && !/^\d+$/.test(cursor))
-      throw new Error("Invalid imsg cursor");
-    const since = Number(cursor ?? 0);
-    if (!Number.isSafeInteger(since)) throw new Error("Invalid imsg cursor");
-    // Capture a bounded snapshot watermark before the actual collection pass.
-    // A single per-chat scan can miss a new row in an already-scanned chat while
-    // advancing past it using a newer row from a later chat.
-    let cutoff = since;
-    for (const chat of await this.chats())
-      for (const row of await this.history(chat))
-        cutoff = Math.max(cutoff, messageRowid(row));
-    const events: { id: number; event: IngestEvent }[] = [];
-    for (const chat of await this.chats()) {
-      for (const row of await this.history(chat)) {
-        const id = messageRowid(row);
-        if (id > since && id <= cutoff)
-          events.push({ id, event: this.parseMessage(row, chat) });
+  private async *streamHistory(
+    chat: Row,
+    options: { start?: string; end?: string },
+  ): AsyncIterable<Row> {
+    for await (const line of this.runner.stream(
+      this.historyArgs(chat, options),
+    ))
+      yield* parseImsgJSON(line);
+  }
+  async *sync(
+    cursor?: string,
+    checkpoint?: (cursor: string) => void,
+  ): AsyncIterable<IngestEvent> {
+    const started = new Date().toISOString();
+    const state = parseCursor(cursor, started);
+    const save = () => checkpoint?.(JSON.stringify(state));
+    const chats = await this.chats();
+    const event = (row: Row, chat: Row) => {
+      const parsed = this.parseMessage(row, chat);
+      state.maxRowid = Math.max(state.maxRowid, messageRowid(row));
+      return parsed;
+    };
+    if (state.backfill) {
+      const progress = state.backfill;
+      for (const chat of chats) {
+        if (progress.completed.includes(Number(chat.id))) continue;
+        let end = progress.chatId === chat.id ? progress.end : undefined;
+        for (;;) {
+          const page = await this.history(chat, { end, limit: PAGE });
+          // Validate the entire page before using any of its dates for pagination.
+          for (const row of page) this.parseMessage(row, chat);
+          if (page.length < PAGE) {
+            for (const row of page)
+              if (messageRowid(row) > progress.legacyRowid)
+                yield event(row, chat);
+            break;
+          }
+          const oldest = Math.min(
+            ...page.map((row) => Date.parse(string(row.created_at))),
+          );
+          const boundary = new Date(oldest - 1).toISOString();
+          const bucketEnd = new Date(oldest + 1).toISOString();
+          if (end && oldest - 1 >= Date.parse(end))
+            throw new Error("imsg history pagination did not advance");
+          for (const row of page)
+            if (
+              Date.parse(string(row.created_at)) >= oldest + 1 &&
+              messageRowid(row) > progress.legacyRowid
+            )
+              yield event(row, chat);
+          // A timestamp can have more than PAGE rows. Stream the whole boundary
+          // bucket rather than dropping ties with an exclusive end cursor.
+          // Pad below by 1ms: imsg formats nanosecond dates to milliseconds.
+          for await (const row of this.streamHistory(chat, {
+            start: boundary,
+            end: bucketEnd,
+          }))
+            if (messageRowid(row) > progress.legacyRowid)
+              yield event(row, chat);
+          end = boundary;
+          progress.chatId = Number(chat.id);
+          progress.end = end;
+          save();
+        }
+        progress.completed.push(Number(chat.id));
+        delete progress.chatId;
+        delete progress.end;
+        save();
       }
+      // Use the backfill START, not its finish: late inserts in previously read
+      // chats are picked up by the next safety-net pass, regardless of rowid.
+      state.lastSync = progress.started;
+      delete state.backfill;
+      save();
+      return;
     }
-    // history is date-descending, not rowid-ordered. All chats must be collected
-    // before advancing the global watermark, including on partial failures.
-    events.sort((a, b) => a.id - b.id);
-    for (const { event } of events) yield event;
+    const start = new Date(
+      Date.parse(state.lastSync!) - OVERLAP_MS,
+    ).toISOString();
+    for (const chat of chats) {
+      const activity = Date.parse(string(chat.last_message_at));
+      // Missing activity metadata cannot safely exclude a chat.
+      if (Number.isFinite(activity) && activity < Date.parse(start)) continue;
+      for await (const row of this.streamHistory(chat, { start }))
+        yield event(row, chat);
+    }
+    // Never filter overlap by maxRowid: a late row from an earlier chat may be
+    // below a later chat's watermark. Core deduplicates by external_id.
+    state.lastSync = started;
+    save();
   }
   live(
     onEvent: (event: IngestEvent) => void,
@@ -329,14 +501,18 @@ export class IMessageChannel implements Channel {
               typeof h === "string" &&
               this.normalizeHandle(h) === this.normalizeHandle(target.handle),
           );
+    const started = Date.now();
+    const confirmationStart = new Date(started - 60_000).toISOString();
     const beforeChats = (await this.chats()).filter(matches);
     if (target.conversationKind === "group" && beforeChats.length !== 1)
       throw new Error("Group chat identifier must match one existing chat");
     const seen = new Set<string>();
     for (const chat of beforeChats)
-      for (const row of await this.history(chat))
+      for (const row of await this.history(chat, {
+        start: confirmationStart,
+        limit: 100,
+      }))
         seen.add(String(row.guid || messageRowid(row)));
-    const started = Date.now();
     const args = [
       "send",
       ...(target.conversationKind === "group"
@@ -378,6 +554,7 @@ export class IMessageChannel implements Channel {
         ).filter(matches))
           for (const row of await this.history(
             chat,
+            { start: confirmationStart, limit: 100 },
             Math.max(1, deadline - Date.now()),
           )) {
             if (
