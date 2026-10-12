@@ -33,7 +33,14 @@ const target: SendTarget = {
 };
 function setup() {
   const client = {
-    accounts: { list: vi.fn(async () => accounts) },
+    accounts: {
+      list: vi.fn(async () => accounts),
+      contacts: {
+        search: vi.fn(async () => ({
+          items: direct.participants.items.filter((u) => !u.isSelf),
+        })),
+      },
+    },
     chats: {
       list: vi.fn(() => iterable([direct, group])),
       retrieve: vi.fn(async (id: string) => (id === "group" ? group : direct)),
@@ -75,6 +82,30 @@ class Socket extends EventEmitter {
   });
 }
 afterEach(() => vi.useRealTimers());
+it("resolves exact usernames through contacts before starting a DM and refuses fuzzy matches", async () => {
+  const { channel, client } = setup();
+  await channel.send(target, { text: "hello" });
+  expect(client.accounts.contacts.search).toHaveBeenCalledWith(
+    "ig",
+    { query: "@alice" },
+    expect.objectContaining({ timeout: 180000, maxRetries: 0 }),
+  );
+  expect(client.chats.start).toHaveBeenCalledWith({
+    accountID: "ig",
+    user: { id: direct.participants.items.find((u) => !u.isSelf)!.id },
+  });
+  client.accounts.contacts.search.mockResolvedValue({
+    items: [{ id: "wrong", username: "alice_similar" }],
+  });
+  await expect(channel.send(target, { text: "hello" })).rejects.toThrow(
+    "exact username",
+  );
+  expect(client.chats.start).toHaveBeenCalledTimes(1);
+  client.accounts.contacts.search.mockRejectedValue(new Error("timeout"));
+  await expect(channel.send(target, { text: "hello" })).rejects.toThrow(
+    "Instagram contact lookup failed",
+  );
+});
 describe("Instagram Beeper adapter", () => {
   it("maps direct/group, normalized usernames, direction, metadata, raw, and scoped IDs", async () => {
     const { channel, client } = setup();
@@ -209,7 +240,7 @@ describe("Instagram Beeper adapter", () => {
     });
     expect(client.chats.start).toHaveBeenCalledWith({
       accountID: "ig",
-      user: { username: "alice" },
+      user: { id: direct.participants.items.find((u) => !u.isSelf)!.id },
     });
     expect(client.messages.retrieve).toHaveBeenCalledWith("pending", {
       chatID: "direct",

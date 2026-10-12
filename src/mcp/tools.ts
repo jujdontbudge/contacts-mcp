@@ -20,6 +20,19 @@ const person = {
   notes: z.string().optional(),
   links: z.array(link).optional(),
 };
+const include_raw = z
+  .boolean()
+  .optional()
+  .default(false)
+  .describe("Include full stored platform payloads; omitted by default");
+function messageOutput<T extends { raw: unknown }>(
+  message: T,
+  includeRaw?: boolean,
+): T | Omit<T, "raw"> {
+  if (includeRaw) return message;
+  const { raw: _raw, ...result } = message;
+  return result;
+}
 const limit = z.number().int().min(1).max(1000).default(100);
 const createSchema = z.object(person);
 const updateSchema = z.object({
@@ -43,7 +56,12 @@ const content = {
   email_bcc: z.array(z.string().email()).optional(),
   attachments: z.array(attachment).optional(),
   reply_to_external_id: id.optional(),
-  metadata: z.object({ instagram_tag: z.literal("HUMAN_AGENT").optional() }).optional().describe("Explicit human support tag; requires Meta Human Agent approval, never for automated or promotional messages"),
+  metadata: z
+    .object({ instagram_tag: z.literal("HUMAN_AGENT").optional() })
+    .optional()
+    .describe(
+      "Explicit human support tag; requires Meta Human Agent approval, never for automated or promotional messages",
+    ),
   kind: id.optional().describe("Message category used by standing kind rules"),
 };
 export function tools(core: ContactsCore) {
@@ -120,20 +138,20 @@ export function tools(core: ContactsCore) {
     },
     link_handle: {
       description:
-        "Explicitly link an unlinked or mislinked handle to a person. Supply exact identity proof; fuzzy similarity is insufficient.",
+        "Explicitly link an unlinked or mislinked handle to a person. Proof means a verified exact identity match (e.g. confirmed address or username), not fuzzy similarity. Supply a proof statement or true to attest you verified it.",
       schema: z.object({
         handle_id: id,
         person_id: id,
         actor,
         reason,
-        exact_proof: id,
+        exact_proof: z.union([id.trim().min(1), z.literal(true)]),
       }),
       call: (args: {
         handle_id: string;
         person_id: string;
         actor: string;
         reason: string;
-        exact_proof: string;
+        exact_proof: string | true;
       }) =>
         core.handles.link(
           args.handle_id,
@@ -158,9 +176,15 @@ export function tools(core: ContactsCore) {
     get_timeline: {
       description:
         "Read a person’s messages across channels, newest first, including group conversations they participate in.",
-      schema: z.object({ person_id: id, limit }),
-      call: (args: { person_id: string; limit: number }) =>
-        core.conversations.timeline(args.person_id, args.limit),
+      schema: z.object({ person_id: id, limit, include_raw }),
+      call: (args: {
+        person_id: string;
+        limit: number;
+        include_raw?: boolean;
+      }) =>
+        core.conversations
+          .timeline(args.person_id, args.limit)
+          .map((m) => messageOutput(m, args.include_raw)),
     },
     list_conversations: {
       description:
@@ -175,9 +199,20 @@ export function tools(core: ContactsCore) {
     get_conversation: {
       description:
         "Read a conversation with participants and chronological messages.",
-      schema: z.object({ conversation_id: id }),
-      call: ({ conversation_id }: { conversation_id: string }) =>
-        core.conversations.detail(conversation_id),
+      schema: z.object({ conversation_id: id, include_raw }),
+      call: ({
+        conversation_id,
+        include_raw,
+      }: {
+        conversation_id: string;
+        include_raw?: boolean;
+      }) => {
+        const detail = core.conversations.detail(conversation_id);
+        return {
+          ...detail,
+          messages: detail.messages.map((m) => messageOutput(m, include_raw)),
+        };
+      },
     },
     search_messages: {
       description:
@@ -187,26 +222,26 @@ export function tools(core: ContactsCore) {
         person_id: id.optional(),
         channel: channel.optional(),
         limit,
+        include_raw,
       }),
       call: (args: {
         query: string;
         person_id?: string;
         channel?: z.infer<typeof channel>;
         limit: number;
+        include_raw?: boolean;
       }) =>
-        core.conversations.search(
-          args.query,
-          args.person_id,
-          args.channel,
-          args.limit,
-        ),
+        core.conversations
+          .search(args.query, args.person_id, args.channel, args.limit)
+          .map((m) => messageOutput(m, args.include_raw)),
     },
     send_message: {
       description:
-        "Draft by default. Send directly only with authorized_by plus reason or a matching standing rule. Use an explicit person_id or conversation_id, never an ambiguous name. Checks identity, capabilities, reply window and rate limit. Echoes resolved person/handle/channel.",
+        "Draft by default. Send directly only with authorized_by plus reason or a matching standing rule. Use an explicit person_id, conversation_id, or linked handle_id, never an ambiguous name. Checks identity, capabilities, reply window and rate limit. Echoes resolved person/handle/channel.",
       schema: z
         .object({
           ...content,
+          include_raw,
           person_id: id.optional(),
           conversation_id: id.optional(),
           handle_id: id.optional(),
@@ -216,11 +251,28 @@ export function tools(core: ContactsCore) {
           created_by: actor,
         })
         .refine(
-          (a) => a.person_id || a.conversation_id,
-          "Provide person_id or conversation_id",
+          (a) => a.person_id || a.conversation_id || a.handle_id,
+          "Provide person_id, conversation_id or linked handle_id",
         ),
-      call: (args: Parameters<typeof core.outbox.send>[0]) =>
-        core.outbox.send(args),
+      call: async (
+        args: Parameters<typeof core.outbox.send>[0] & {
+          include_raw?: boolean;
+        },
+      ) => {
+        const result = await core.outbox.send(args);
+        if (
+          !args.include_raw ||
+          !result.sent_message_id ||
+          !result.conversation_id
+        )
+          return result;
+        return {
+          ...result,
+          message: core.conversations
+            .detail(result.conversation_id)
+            .messages.find((m) => m.id === result.sent_message_id),
+        };
+      },
     },
     list_drafts: {
       description: "List pending draft messages for the approval inbox.",

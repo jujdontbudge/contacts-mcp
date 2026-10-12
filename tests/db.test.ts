@@ -11,20 +11,32 @@ it("persists data in WAL mode, runs migrations once, and enforces uniqueness", (
     core = new ContactsCore({ path });
     expect(core.store.db.pragma("journal_mode", { simple: true })).toBe("wal");
     const person = core.identity.create({ display_name: "Persisted" });
-    core.handles.add({
+    const handle = core.handles.add({
       channel: "email",
       value: "a@example.com",
       person_id: person.id,
       actor: "owner",
       reason: "Confirmed",
     });
-    expect(() =>
-      core!.handles.add({
+    expect(
+      core.handles.add({
         channel: "email",
         value: "A@example.com",
         actor: "owner",
         reason: "Duplicate",
-      }),
+      }).id,
+    ).toBe(handle.id);
+    expect(() =>
+      core!.store.run(
+        "INSERT INTO handles VALUES (?,?,?,?,?,?,?)",
+        "duplicate",
+        "email",
+        "a@example.com",
+        "A@example.com",
+        null,
+        "default",
+        core!.store.now(),
+      ),
     ).toThrow("UNIQUE");
     core.close();
     core = new ContactsCore({ path });

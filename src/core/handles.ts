@@ -23,6 +23,29 @@ export class Handles {
     reason: string;
   }): Handle {
     if (input.person_id) this.identity.get(input.person_id);
+    const existing = this.s.one<Handle>(
+      "SELECT * FROM handles WHERE channel=? AND account_id=? AND value_normalized=?",
+      input.channel,
+      input.account_id ?? "default",
+      this.registry.normalize(input.channel, input.value),
+    );
+    if (existing) {
+      if (!input.person_id || existing.person_id === input.person_id)
+        return existing;
+      if (existing.person_id)
+        throw new Error(
+          `Handle belongs to person ${existing.person_id}; use change_handle to reassign it after verifying identity`,
+        );
+      return this.change(
+        existing.id,
+        {
+          person_id: input.person_id,
+          actor: input.actor,
+          reason: input.reason,
+        },
+        "link",
+      );
+    }
     const id = this.s.id("h");
     this.s.db.transaction(() => {
       this.s.run(
@@ -86,9 +109,12 @@ export class Handles {
     person_id: string,
     actor: string,
     reason: string,
-    exact_proof: string,
+    exact_proof: string | true,
   ): Handle {
-    if (!exact_proof.trim())
+    if (
+      exact_proof !== true &&
+      (typeof exact_proof !== "string" || !exact_proof.trim())
+    )
       throw new Error(
         "Exact proof is required; fuzzy evidence is only a suggestion",
       );

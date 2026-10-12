@@ -1,3 +1,9 @@
+import {
+  emailSubject as subjectKey,
+  emailHeader as header,
+  emailMessageIds as messageIds,
+  emailRfcId as rfcId,
+} from "../core/email-threading.js";
 import { createHash } from "node:crypto";
 import type {
   Channel,
@@ -39,6 +45,9 @@ export interface EmailChannelOptions {
   lookupMessage?: (id: string) => MaybePromise<IngestEvent | undefined>;
   /** Durable event staging sink; phase 1 core ingestion must happen after dispatch. */
   onSent: (event: IngestEvent) => MaybePromise<void>;
+  /** Durable retry inventory; queried on every sync, including after restart. */
+  missingMessageIds?: () => MaybePromise<string[]>;
+  onMetadata?: (id: string, detail: ResendEmail) => MaybePromise<void>;
   clock?: () => Date;
 }
 
@@ -50,26 +59,6 @@ function address(raw: string): string {
 }
 function addresses(values: string[] = []): string[] {
   return [...new Set(values.map(address))];
-}
-function header(email: ResendEmail, name: string): string {
-  return (
-    Object.entries(email.headers ?? {}).find(
-      ([key]) => key.toLowerCase() === name.toLowerCase(),
-    )?.[1] ?? ""
-  );
-}
-function messageIds(value: string): string[] {
-  return value.match(/<[^<>\s]+>/g) ?? [];
-}
-function rfcId(email: ResendEmail): string | undefined {
-  return messageIds(email.message_id ?? header(email, "Message-ID"))[0];
-}
-function subjectKey(subject: string): string {
-  return subject
-    .replace(/^(?:\s*(?:re|fw|fwd)\s*:\s*)+/i, "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
 }
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -86,6 +75,7 @@ export interface EmailChannel extends Channel {
   ): Promise<{ externalId: string; conversationExternalId: string }>;
   /** Retry failed staging, without ever resending an email. */
   flushSent(): Promise<void>;
+  refreshSent(): Promise<void>;
 }
 
 export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
@@ -118,7 +108,9 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
     return flushing;
   }
   async function lookup(id: string): Promise<IngestEvent | undefined> {
-    return known.get(id) ?? (await opts.lookupMessage?.(id));
+    // Core may have joined this event by subject or repaired a legacy split after
+    // the adapter cached it. Durable conversation identity always wins.
+    return (await opts.lookupMessage?.(id)) ?? known.get(id);
   }
   function remember(event: IngestEvent): void {
     known.set(event.external_id, event);
@@ -153,6 +145,29 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
       );
     return (await response.json()) as T;
   }
+  async function refreshSent(): Promise<void> {
+    const ids = (await opts.missingMessageIds?.()) ?? [];
+    let failures = 0;
+    for (const id of ids) {
+      try {
+        const detail = await request<ResendEmail>(
+          `/emails/${encodeURIComponent(id)}`,
+          fullApiKey ?? apiKey,
+        );
+        if (detail.id !== id) throw new Error("Resend sent email ID mismatch");
+        await opts.onMetadata?.(id, detail);
+        const stored = await opts.lookupMessage?.(id);
+        if (stored) remember(stored);
+      } catch {
+        failures++;
+      }
+    }
+    if (failures)
+      throw new Error(
+        `Resend sent metadata reconciliation failed for ${failures} email(s); retry on next sync`,
+      );
+  }
+
   async function map(
     email: ResendEmail,
     conversationId?: string,
@@ -167,8 +182,18 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
     const refs = messageIds(header(email, "References"));
     const parent = messageIds(header(email, "In-Reply-To"))[0];
     const root = refs[0] ?? parent;
-    const rootEvent = root ? await lookup(root) : undefined;
-    const parentEvent = parent ? await lookup(parent) : undefined;
+    let rootEvent: IngestEvent | undefined;
+    for (const id of [parent, ...refs.slice().reverse()]) {
+      if (!id) continue;
+      const stored = await lookup(id);
+      if (stored && stored.account_id === accountId) {
+        rootEvent = stored;
+        break;
+      }
+    }
+    const candidateParent = parent ? await lookup(parent) : undefined;
+    const parentEvent =
+      candidateParent?.account_id === accountId ? candidateParent : undefined;
     const conversation =
       conversationId ??
       rootEvent?.conversation_external_id ??
@@ -206,7 +231,14 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
     capabilities: { startConversation: true, groups: true, cc: true },
     normalizeHandle: address,
     flushSent,
+    refreshSent,
     async *sync(cursor?: string) {
+      let metadataError: unknown;
+      try {
+        await refreshSent();
+      } catch (error) {
+        metadataError = error;
+      }
       const pending: ResendEmail[] = [];
       let after: string | undefined;
       const pages = new Set<string>();
@@ -245,6 +277,7 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
           throw new Error("Resend received email ID mismatch");
         yield await map(detail);
       }
+      if (metadataError) throw metadataError;
     },
     async send(target: SendTarget, content: EmailContent) {
       if (target.channel !== "email" || target.account_id !== accountId)
@@ -340,6 +373,7 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
           `/emails/${encodeURIComponent(sent.id)}`,
           fullApiKey ?? apiKey,
         );
+        if (detail.id !== sent.id) detail = {};
       } catch {
         /* staged raw marks missing Message-ID */
       }

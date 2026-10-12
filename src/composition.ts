@@ -15,7 +15,11 @@ export async function createContactsSystem(
     adapters?: Omit<AdapterOptions, "email"> & {
       email?: Omit<
         NonNullable<AdapterOptions["email"]>,
-        "getOutboxId" | "lookupMessage" | "onSent"
+        | "getOutboxId"
+        | "lookupMessage"
+        | "onSent"
+        | "missingMessageIds"
+        | "onMetadata"
       >;
     };
   } = {},
@@ -48,16 +52,35 @@ export async function createContactsSystem(
     instagramOfficial: {
       ...options.adapters?.instagramOfficial,
       clock: options.adapters?.instagramOfficial?.clock ?? options.clock,
-      loadToken: () => core.loadChannelToken("instagram", registry.get("instagram").accountId!),
-      saveToken: token => core.saveChannelToken("instagram", registry.get("instagram").accountId!, token),
-      getLastInboundAt: external => core.lastInboundAt("instagram", registry.get("instagram").accountId!, external),
+      loadToken: () =>
+        core.loadChannelToken(
+          "instagram",
+          registry.get("instagram").accountId!,
+        ),
+      saveToken: (token) =>
+        core.saveChannelToken(
+          "instagram",
+          registry.get("instagram").accountId!,
+          token,
+        ),
+      getLastInboundAt: (external) =>
+        core.lastInboundAt(
+          "instagram",
+          registry.get("instagram").accountId!,
+          external,
+        ),
     },
     instagramBoth: {
       ...options.adapters?.instagramBoth,
       clock: options.adapters?.instagramBoth?.clock ?? options.clock,
-      getLastInboundAt: target => target.conversationExternalId
-        ? core.lastInboundAt("instagram", target.account_id, target.conversationExternalId)
-        : undefined,
+      getLastInboundAt: (target) =>
+        target.conversationExternalId
+          ? core.lastInboundAt(
+              "instagram",
+              target.account_id,
+              target.conversationExternalId,
+            )
+          : undefined,
     },
     email: {
       ...options.adapters?.email,
@@ -69,6 +92,16 @@ export async function createContactsSystem(
         return id;
       },
       lookupMessage: (id) => core.conversations.lookupEvent("email", id),
+      missingMessageIds: () =>
+        core.conversations.missingEmailMessageIds(
+          options.adapters?.email?.accountId ?? "default",
+        ),
+      onMetadata: (id, detail) =>
+        core.conversations.updateEmailMetadata(
+          options.adapters?.email?.accountId ?? "default",
+          id,
+          detail,
+        ),
       onSent: (event) => {
         const id = (event.raw as { contacts_outbox_id?: string })
           .contacts_outbox_id;

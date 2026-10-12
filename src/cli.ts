@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { fileURLToPath } from "node:url";
+import type { EmailChannel } from "./channels/email.js";
 import { createContactsSystem } from "./composition.js";
 import { loadEnvFile } from "node:process";
 import { existsSync } from "node:fs";
@@ -79,7 +80,12 @@ async function main(): Promise<void> {
   }
   try {
     let result: unknown;
-    if (command === "person" && action === "list")
+    if (command === "repair-email-threads") {
+      const email = registry.list().find((c) => c.id === "email") as
+        EmailChannel | undefined;
+      if (email) await email.refreshSent();
+      result = core.conversations.repairEmailThreads();
+    } else if (command === "person" && action === "list")
       result = core.identity.list();
     else if (command === "person" && action === "show" && args[0])
       result = core.identity.detail(args[0]);
@@ -109,7 +115,7 @@ async function main(): Promise<void> {
       result = core.outbox.reject(args[0], args[1], args.slice(2).join(" "));
     else
       throw new Error(
-        "Usage: contacts-mcp stdio | serve | sync [channel] | person list|show <id>|create <name> | drafts list|approve <id> <authorizer> <reason>|reject <id> <actor> <reason>",
+        "Usage: contacts-mcp stdio | serve | sync [channel] | repair-email-threads | person list|show <id>|create <name> | drafts list|approve <id> <authorizer> <reason>|reject <id> <actor> <reason>",
       );
     console.log(JSON.stringify(result, null, 2));
   } finally {

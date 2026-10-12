@@ -53,7 +53,10 @@ function harness() {
     watch: () => () => {},
   };
   const client: BeeperTransport = {
-    accounts: { list: async () => accounts },
+    accounts: {
+      list: async () => accounts,
+      contacts: { search: async () => ({ items: [] }) },
+    },
     chats: {
       async *list() {
         yield { ...direct, ...page([]) };
@@ -498,6 +501,186 @@ it("honors an environment send-rate override before any provider call", async ()
       }),
     ).rejects.toThrow("hourly rate limit");
     expect(fake.calls).toHaveLength(0);
+  } finally {
+    core.close();
+  }
+});
+
+it("refreshes delayed sent Message-IDs after restart before receiving replies without advancing the received cursor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "contacts-delayed-"));
+  const path = join(dir, "contacts.db");
+  let ready = false;
+  const methods: string[] = [];
+  const reply = {
+    id: "inbound-reply",
+    from: "alice@example.com",
+    to: ["outreach@excerlock.com"],
+    subject: "Re: Thread",
+    text: "reply",
+    created_at: clock().toISOString(),
+    headers: { "In-Reply-To": "<delayed@email.amazonses.com>" },
+  };
+  const http: typeof fetch = async (input, init = {}) => {
+    const url = new URL(String(input));
+    methods.push(`${init.method ?? "GET"} ${url.pathname}`);
+    if (init.method === "POST") return Response.json({ id: "delayed" });
+    if (url.pathname === "/emails/delayed")
+      return Response.json({
+        id: "delayed",
+        message_id: ready ? "<delayed@email.amazonses.com>" : null,
+      });
+    if (url.pathname === "/emails/receiving")
+      return Response.json({ data: ready ? [reply] : [], has_more: false });
+    if (url.pathname === "/emails/receiving/inbound-reply")
+      return Response.json(reply);
+    throw new Error("Unexpected fixture request");
+  };
+  let system = await createContactsSystem({
+    path,
+    env: emailEnv,
+    adapters: { email: { fetch: http } },
+    clock,
+  });
+  try {
+    const person = system.core.identity.create({ display_name: "Alice" });
+    system.core.handles.add({
+      channel: "email",
+      value: "alice@example.com",
+      person_id: person.id,
+      actor: "owner",
+      reason: "Fixture",
+    });
+    const sent = await system.core.outbox.send({
+      person_id: person.id,
+      text: "first",
+      subject: "Thread",
+      created_by: "agent",
+      authorized_by: "owner",
+      reason: "Offline",
+    });
+    expect(
+      system.core.conversations.lookupEvent("email", "delayed")?.raw,
+    ).toMatchObject({ message_id: null });
+    system.core.close();
+    ready = true;
+    system = await createContactsSystem({
+      path,
+      env: emailEnv,
+      adapters: { email: { fetch: http } },
+      clock,
+    });
+    await syncChannel(system.core, system.registry.get("email"));
+    expect(
+      system.core.conversations.lookupEvent("email", "delayed")?.raw,
+    ).toMatchObject({ message_id: "<delayed@email.amazonses.com>" });
+    expect(
+      system.core.conversations.lookupEvent("email", "inbound-reply")
+        ?.conversation_external_id,
+    ).toBe(system.core.conversations.get(sent.conversation_id!).external_id);
+    expect(
+      system.core.syncStatus().find((s) => s.channel === "email")?.cursor,
+    ).toBe("inbound-reply");
+    expect(methods.filter((m) => m.startsWith("POST"))).toHaveLength(1);
+  } finally {
+    system.core.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+it("metadata retrieval errors do not starve inbound ingestion and remain visible in sync status", async () => {
+  const fake = harness();
+  const original = fake.adapters.email.fetch;
+  const http: typeof fetch = async (input, init) => {
+    if (new URL(String(input)).pathname.startsWith("/emails/sent-"))
+      return new Response("{}", { status: 503 });
+    return original(input, init);
+  };
+  const { core, registry } = await createContactsSystem({
+    path: ":memory:",
+    env: emailEnv,
+    adapters: { email: { fetch: http } },
+    clock,
+  });
+  try {
+    const person = core.identity.create({ display_name: "Fixture" });
+    core.handles.add({
+      channel: "email",
+      value: "zoey@example.com",
+      person_id: person.id,
+      actor: "owner",
+      reason: "Confirmed",
+    });
+    await core.outbox.send({
+      person_id: person.id,
+      text: "sent",
+      subject: "First",
+      created_by: "agent",
+      authorized_by: "owner",
+      reason: "Offline",
+    });
+    await expect(syncChannel(core, registry.get("email"))).rejects.toThrow();
+    expect(core.conversations.search("", undefined, "email")).toHaveLength(4);
+    expect(core.syncStatus().find((s) => s.channel === "email")).toMatchObject({
+      cursor: "r3",
+      last_error: expect.stringContaining("metadata"),
+    });
+  } finally {
+    core.close();
+  }
+});
+it("can reply to an inbound email joined by subject fallback despite adapter cache keys", async () => {
+  let count = 0;
+  const inbound = {
+    id: "reply",
+    from: "alice@example.com",
+    to: ["outreach@excerlock.com"],
+    subject: "AW: Thread",
+    text: "reply",
+    message_id: "<reply@example.com>",
+    created_at: "2026-10-12T13:00:00Z",
+    headers: { "In-Reply-To": "<unknown-final-ses@example.com>" },
+  };
+  const http: typeof fetch = async (input, init = {}) => {
+    const path = new URL(String(input)).pathname;
+    if (init.method === "POST") return Response.json({ id: `sent-${++count}` });
+    if (path.startsWith("/emails/sent-"))
+      return Response.json({ id: path.split("/").at(-1), message_id: null });
+    if (path === "/emails/receiving")
+      return Response.json({ data: [inbound], has_more: false });
+    if (path === "/emails/receiving/reply") return Response.json(inbound);
+    throw new Error("Unexpected fixture request");
+  };
+  const { core, registry } = await createContactsSystem({
+    path: ":memory:",
+    env: emailEnv,
+    adapters: { email: { fetch: http } },
+    clock,
+  });
+  try {
+    const person = core.identity.create({ display_name: "Alice" });
+    core.handles.add({
+      channel: "email",
+      value: "alice@example.com",
+      person_id: person.id,
+      actor: "owner",
+      reason: "Confirmed",
+    });
+    const request = {
+      person_id: person.id,
+      text: "first",
+      subject: "Thread",
+      created_by: "agent",
+      authorized_by: "owner",
+      reason: "Offline",
+    };
+    const first = await core.outbox.send(request);
+    await syncChannel(core, registry.get("email"));
+    const reply = await core.outbox.send({
+      ...request,
+      subject: undefined,
+      reply_to_external_id: "reply",
+    });
+    expect(reply.status).toBe("sent");
+    expect(reply.conversation_id).toBe(first.conversation_id);
   } finally {
     core.close();
   }

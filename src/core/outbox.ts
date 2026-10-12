@@ -38,7 +38,14 @@ export class OutboxService {
     let conversation = input.conversation_id
       ? this.conversations.get(input.conversation_id)
       : undefined;
-    let personId = input.person_id;
+    const explicit = input.handle_id
+      ? this.handles.get(input.handle_id)
+      : undefined;
+    if (explicit && !explicit.person_id)
+      throw new Error(
+        "Handle is unlinked; link_handle with exact identity proof first",
+      );
+    let personId = input.person_id ?? explicit?.person_id;
     if (conversation && !personId) {
       const persons = this.s.all<{ person_id: string }>(
         "SELECT DISTINCT h.person_id FROM handles h JOIN conversation_participants cp ON cp.handle_id=h.id WHERE cp.conversation_id=? AND h.person_id IS NOT NULL",
@@ -55,9 +62,7 @@ export class OutboxService {
     this.identity.get(personId);
     if (conversation && input.channel && input.channel !== conversation.channel)
       throw new Error("Conversation/channel mismatch");
-    let explicit = input.handle_id
-      ? this.handles.get(input.handle_id)
-      : undefined;
+
     if (explicit && explicit.person_id !== personId)
       throw new Error("Handle does not belong to person");
     let channel = conversation?.channel ?? input.channel ?? explicit?.channel;
@@ -69,13 +74,13 @@ export class OutboxService {
           (c) =>
             c.kind === "direct" &&
             (!explicit ||
-            (c.channel === explicit.channel &&
-              c.account_id === explicit.account_id &&
-              !!this.s.one(
-                "SELECT 1 FROM conversation_participants WHERE conversation_id=? AND handle_id=?",
-                c.id,
-                explicit.id,
-              ))),
+              (c.channel === explicit.channel &&
+                c.account_id === explicit.account_id &&
+                !!this.s.one(
+                  "SELECT 1 FROM conversation_participants WHERE conversation_id=? AND handle_id=?",
+                  c.id,
+                  explicit.id,
+                ))),
         );
       channel ??= conversation?.channel;
     }
@@ -146,8 +151,11 @@ export class OutboxService {
       if (
         !last ||
         this.s.clock().getTime() - Date.parse(last.sent_at) >=
-          (target.channel === "instagram" && content.metadata?.instagram_tag === "HUMAN_AGENT"
-            ? 168 : channel.capabilities.replyWindowHours) * 3600000
+          (target.channel === "instagram" &&
+          content.metadata?.instagram_tag === "HUMAN_AGENT"
+            ? 168
+            : channel.capabilities.replyWindowHours) *
+            3600000
       )
         throw new Error("Reply window is closed");
     }

@@ -17,7 +17,16 @@ import { normalizeHandle, type Channel, type IngestEvent } from "./channel.js";
 
 /** Structural SDK seam: list methods retain SDK auto-pagination. */
 export interface BeeperTransport {
-  accounts: { list(): PromiseLike<Account[]> };
+  accounts: {
+    list(): PromiseLike<Account[]>;
+    contacts: {
+      search(
+        accountID: string,
+        query: { query: string },
+        options?: { timeout?: number; maxRetries?: number },
+      ): PromiseLike<{ items: User[] }>;
+    };
+  };
   chats: {
     list(query: ChatListParams): AsyncIterable<ChatListResponse>;
     retrieve(
@@ -196,7 +205,8 @@ export function createInstagramChannel(
     },
     async send(target, content) {
       if (target.channel !== "instagram") throw new Error("Wrong channel");
-      if (content.metadata?.instagram_tag) throw new Error("HUMAN_AGENT requires the official transport");
+      if (content.metadata?.instagram_tag)
+        throw new Error("HUMAN_AGENT requires the official transport");
       if (
         content.attachments?.length ||
         content.email_cc?.length ||
@@ -211,12 +221,34 @@ export function createInstagramChannel(
       if (!target.conversationExternalId && target.conversationKind === "group")
         throw new Error("Group sends require a chat ID");
       const requested = handle(target.handle);
-      const chat = target.conversationExternalId
-        ? await fullChat(target.conversationExternalId)
-        : await client.chats.start({
-            accountID: self.accountID,
-            user: { username: requested },
-          });
+      let chat: Chat;
+      if (target.conversationExternalId)
+        chat = await fullChat(target.conversationExternalId);
+      else {
+        let items: User[];
+        try {
+          ({ items } = await client.accounts.contacts.search(
+            self.accountID,
+            { query: `@${requested}` },
+            { timeout: 180_000, maxRetries: 0 },
+          ));
+        } catch {
+          throw new Error(
+            "Instagram contact lookup failed or timed out (180s); verify Beeper connectivity and retry lookup",
+          );
+        }
+        const matches = items.filter(
+          (u) => u.username && username(u) === requested && !u.isSelf,
+        );
+        if (matches.length !== 1 || !matches[0].id || matches[0].cannotMessage)
+          throw new Error(
+            "Instagram contact lookup requires one messageable exact username match",
+          );
+        chat = await client.chats.start({
+          accountID: self.accountID,
+          user: { id: matches[0].id },
+        });
+      }
       if (
         chat.accountID !== self.accountID ||
         chat.merge ||

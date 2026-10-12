@@ -66,7 +66,7 @@ interface Channel {
 | Adapter | Read | Live | Send | Notes |
 |---|---|---|---|---|
 | `imsg` (iMessage) | `imsg` CLI JSON read of chat.db, cursor = message ROWID | `imsg watch`, plus a 5 s poll | `imsg send` by handle or by group chat ID, then confirm it appears in chat.db | needs Full Disk Access and Automation → Messages |
-| `beeper` (Instagram) | `@beeper/desktop-api` chats/messages list | WebSocket `ws://localhost:23373/v1/ws`, plus a 5 min reconcile | `messages.send`; new DMs via `chats.start({ user: { username } })` | Beeper Desktop must be running; sends are rate-limited (default 20/hour) |
+| `beeper` (Instagram) | `@beeper/desktop-api` chats/messages list | WebSocket `ws://localhost:23373/v1/ws`, plus a 5 min reconcile | `messages.send`; new DMs via contacts search by exact username, then `chats.start({ user: { id } })` | Beeper Desktop must be running; sends are rate-limited (default 20/hour) |
 | `resend` (email) | list received emails (full-access key), cursor = last ID | 2 min poll | send with to/cc/bcc, `In-Reply-To`/`References` for threading | from `outreach@excerlock.com` |
 | `zernio` (TikTok) | `GET /v1/inbox/conversations` and thread messages | 2 min poll (webhooks later) | `POST /v1/inbox/conversations/{id}/messages` | blocked when outside the 48 h window |
 
@@ -78,7 +78,7 @@ interface Channel {
 Embeddings ("the girl from the gym video") can be added later behind the same tool.
 
 ## 7. Send flow
-1. `send_message` takes a person ID or conversation ID, an optional channel, the content, and optional `authorized_by` + `reason`.
+1. `send_message` takes a person ID, conversation ID or linked handle ID (deriving its person), an optional channel, the content, and optional `authorized_by` + `reason`.
 2. It resolves the target: an explicit conversation, otherwise that person's most recent conversation on the chosen channel, otherwise their newest handle on that channel. It refuses if the channel can't start a conversation (TikTok).
 3. Checks: the handle belongs to that person, the TikTok reply window is open, and the Instagram rate limit isn't hit.
 4. If `authorized_by` is given or a send rule matches, it sends straight away. Otherwise it creates a **draft** and returns the draft ID.

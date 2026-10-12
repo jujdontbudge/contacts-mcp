@@ -381,3 +381,35 @@ describe("Resend email channel", () => {
     }
   });
 });
+it("uses any stored References entry even when the first root is unknown and subject changed", async () => {
+  const ancestor: IngestEvent = {
+    channel: "email",
+    account_id: "default",
+    external_id: "old",
+    conversation_external_id: "original",
+    direction: "out",
+    sender: "outreach@excerlock.com",
+    text: "first",
+    sent_at: "2026-10-12T10:00:00Z",
+    raw: { message_id: "<stored@example.com>" },
+  };
+  const received: ResendEmail = {
+    id: "reply",
+    from: "zoey@example.com",
+    to: ["outreach@excerlock.com"],
+    subject: "Changed subject",
+    created_at: "2026-10-12T11:00:00Z",
+    text: "reply",
+    headers: {
+      References:
+        "<unknown@example.com> <stored@example.com> <missing@example.com>",
+    },
+  };
+  const { channel } = harness([received], {
+    lookupMessage: (id) =>
+      id === "<stored@example.com>" ? ancestor : undefined,
+  });
+  expect((await collect(channel.sync()))[0].conversation_external_id).toBe(
+    "original",
+  );
+});
