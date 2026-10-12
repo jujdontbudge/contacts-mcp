@@ -1,0 +1,5 @@
+.vibe-wise/
+data/
+.env
+node_modules/
+dist/
