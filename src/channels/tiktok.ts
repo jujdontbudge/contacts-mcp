@@ -167,7 +167,7 @@ export function createTikTokChannel(opts: TikTokOptions = {}): TikTokChannel {
   }
 
   return {
-    id: "tiktok", capabilities: { startConversation: false, groups: false, cc: false, replyWindowHours: 48 },
+    id: "tiktok", accountId, capabilities: { startConversation: false, groups: false, cc: false, replyWindowHours: 48 },
     normalizeHandle(raw) {
       // Opaque TikTok user IDs are case-sensitive; usernames are not.
       return /^tiktok:(user|account):/.test(raw.trim()) ? raw.trim() : normalizeHandle("tiktok", raw);

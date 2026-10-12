@@ -70,6 +70,39 @@ async function collect(events: AsyncIterable<IngestEvent>) {
   for await (const event of events) result.push(event);
   return result;
 }
+it("excludes sending/reply-to aliases from participants and treats same-domain colleagues as inbound", async () => {
+  const colleague = { ...received[0], from: "teammate@excerlock.com", to: ["replies@excerlock.com"], cc: [], headers: {} };
+  const { channel } = harness([colleague]);
+  const events = await collect(channel.sync());
+  expect(events[0]).toMatchObject({ direction: "in", kind: "direct", participants: ["teammate@excerlock.com"] });
+});
+it("refuses a To override excluding the selected handle before sending HTTP", async () => {
+  const h = harness();
+  await expect(h.channel.send(target, { subject: "hello", text: "hi", email_to: ["other@example.com"] })).rejects.toThrow("selected handle");
+  expect(h.calls).toHaveLength(0);
+});
+it("a replay removes legacy own aliases from messageable participants without deleting their messages", async () => {
+  const { channel } = harness();
+  const [event] = await collect(channel.sync());
+  const core = new ContactsCore({ path: ":memory:", registry: new ChannelRegistry([channel]) });
+  try {
+    const message = core.ingest(event);
+    const self = core.handles.ensure("email", "default", "replies@excerlock.com");
+    core.store.run("INSERT INTO conversation_participants VALUES (?,?)", message.conversation_id, self.id);
+    core.ingest(event);
+    const detail = core.conversations.detail(message.conversation_id);
+    expect(detail.participants.some((handle: any) => handle.id === self.id)).toBe(false);
+    expect(detail.messages).toHaveLength(1);
+  } finally { core.close(); }
+});
+it("never inherits parent CC/BCC into a subsequent reply", async () => {
+  const { channel, calls } = harness();
+  await collect(channel.sync());
+  await channel.send(target, { text: "first", reply_to_external_id: "r2", email_cc: ["manager@example.com"], email_bcc: ["private@example.com"] });
+  await channel.send(target, { text: "second", reply_to_external_id: "sent1" });
+  const payload = JSON.parse(String(calls.filter(call => call.init.method === "POST").at(-1)!.init.body));
+  expect(payload).toMatchObject({ to: [target.handle], cc: [], bcc: [] });
+});
 describe("Resend email channel", () => {
   it("maps full received content and ingests paginated history oldest first", async () => {
     const { channel, calls } = harness();
@@ -79,7 +112,6 @@ describe("Resend email channel", () => {
       sender: "zoey@example.com",
       participants: [
         "manager@example.com",
-        "outreach@excerlock.com",
         "zoey@example.com",
       ],
       kind: "group",

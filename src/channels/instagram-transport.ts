@@ -15,7 +15,7 @@ export function createInstagramBothChannel(beeper: Channel, official: InstagramO
   const clock = opts.clock ?? (() => new Date());
   async function map(event: IngestEvent): Promise<IngestEvent> {
     const mid = opts.getPlatformMessageId?.(event);
-    return mid ? { ...event, external_id: officialMessageId(await official.resolveUserId(), mid) } : event;
+    return mid ? { ...event, external_id: officialMessageId(await official.resolveUserId(), mid), raw: { ...(event.raw as object), contacts_platform_message_id: mid } } : event;
   }
   return {
     id: "instagram", accountId: beeper.accountId,
@@ -39,11 +39,15 @@ export function createInstagramBothChannel(beeper: Channel, official: InstagramO
       } else state = { version: 1 };
       const save = () => { cursor = Buffer.from(JSON.stringify(state)).toString("base64url"); checkpoint?.(cursor); };
       // No naked child checkpoints may enter the shared sync_state row.
+      const errors: string[] = [];
       for (const [key, child] of [["beeper", beeper], ["official", official]] as const) {
-        for await (const event of child.sync(state[key], next => { state[key] = next; save(); })) yield key === "beeper" ? await map(event) : event;
-        state[key] = child.getCursor?.() ?? state[key];
-        save();
+        try {
+          for await (const event of child.sync(state[key], next => { state[key] = next; save(); })) yield key === "beeper" ? await map(event) : event;
+          state[key] = child.getCursor?.() ?? state[key];
+          save();
+        } catch (error) { errors.push(`${key}: ${error instanceof Error ? error.message : String(error)}`); }
       }
+      if (errors.length) throw new Error(errors.join("; "));
     },
     live(onEvent, onError) {
       return beeper.live?.(event => { void map(event).then(onEvent).catch(error => onError?.(error)); }, onError) ?? (() => {});

@@ -1,4 +1,4 @@
-import type { ChannelId, SendContent } from "../channels/channel.js";
+import type { ChannelId, SendContent, SendTarget } from "../channels/channel.js";
 export interface Person {
   id: string;
   display_name: string;
@@ -51,6 +51,9 @@ export interface Outbox {
   decided_at: string | null;
   sent_message_id: string | null;
   error: string | null;
+  reconciled_at: string | null;
+  target_snapshot: SendTarget | null;
+  send_started_sequence: number | null;
 }
 export interface SendRequest extends SendContent {
   person_id?: string;
@@ -69,4 +72,6 @@ export interface SendRule {
   created_by: string;
   created_at: string;
   active: number;
+  removed_by: string | null;
+  removed_at: string | null;
 }

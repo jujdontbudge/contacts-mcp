@@ -41,11 +41,6 @@ export async function createContactsSystem(
         options.adapters?.instagram?.onError?.(error);
       },
       onCursor: async (cursor) => {
-        core.checkpointSync(
-          "instagram",
-          registry.get("instagram").accountId!,
-          cursor,
-        );
         await options.adapters?.instagram?.onCursor?.(cursor);
       },
     },

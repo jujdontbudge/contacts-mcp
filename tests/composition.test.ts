@@ -195,6 +195,7 @@ it("composes four real adapters on fixtures: cursors, one person timeline, four 
       person_id: person.id,
       channel: "email",
       text: "Authorized fixture reply",
+      conversation_id: core.conversations.list(person.id, "email")[0].id,
       reply_to_external_id: "r3",
       authorized_by: "owner",
       reason: "Offline test",

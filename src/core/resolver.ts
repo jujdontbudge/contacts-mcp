@@ -49,15 +49,23 @@ export class Resolver {
         const values = [
           p.display_name,
           ...p.aliases,
-          ...detail.handles.map((h) => h.value_normalized),
           ...detail.links.map((l) => `${l.system}:${l.external_id}`),
         ];
-        const best = Math.max(
-          0,
-          ...values.flatMap((v) =>
-            [...queries].filter(Boolean).map((q) => score(q, normalized(v))),
-          ),
-        );
+        const typedHandle = query.includes("@") || /^(tiktok:|beeper:|igsid:)/.test(query);
+        let best = 0;
+        for (const value of values) {
+          for (const q of queries) if (q) best = Math.max(best, Math.min(typedHandle ? 0.94 : 1, score(q, normalized(value))));
+          if (best === 1) break;
+        }
+        // Names are accent/punctuation tolerant; handles keep their channel's exact identity.
+        // Never turn foo.bar and foo_bar, or case-sensitive platform IDs, into exact proof.
+        for (const handle of detail.handles) {
+          let exact = false;
+          try { exact = normalizeHandle(handle.channel, query) === handle.value_normalized; }
+          catch { /* Query is not a handle on this channel. */ }
+          if (exact) best = 1;
+          else for (const q of queries) if (q) best = Math.max(best, Math.min(0.94, score(q, normalized(handle.value_normalized))));
+        }
         const last_message = this.conversations.timeline(p.id, 1)[0] ?? null;
         return {
           ...detail,

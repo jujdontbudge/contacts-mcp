@@ -181,10 +181,11 @@ describe("ingest and handles", () => {
     });
     expect(events[1].reason).toContain("Typo correction");
   });
-  it("dedupes by channel/external ID across accounts and rejects conflicting direction", () => {
+  it("dedupes by channel/external ID and rejects conflicting accounts and direction", () => {
     const { core, event } = setup();
     const m = core.ingest(event());
-    expect(core.ingest(event({ account_id: "other" })).id).toBe(m.id);
+    expect(core.ingest(event()).id).toBe(m.id);
+    expect(() => core.ingest(event({ account_id: "other" }))).toThrow("conflicting account");
     expect(() => core.ingest(event({ direction: "out" }))).toThrow(
       "conflicting direction",
     );

@@ -48,9 +48,10 @@ agents ──MCP (stdio | HTTP)──► tools ──► core ──► SQLite (
 - `conversations(id 'c_<ulid>', channel, account_id, external_id, kind direct|group, title, UNIQUE(channel, account_id, external_id))`.
 - `conversation_participants(conversation_id, handle_id)`.
 - `messages(id 'm_<ulid>', conversation_id, channel, external_id, direction in|out, sender_handle_id, sent_at, text, subject, email_to/cc/bcc JSON, attachments JSON, reply_to_external_id, raw JSON, ingested_at, UNIQUE(channel, external_id))`. Deduplicated by channel ID.
-- `outbox(id 'o_<ulid>', status draft|approved|sending|sent|failed|rejected, target (person_id, conversation_id, handle_id, channel), payload JSON, authorized_by, reason, created_by, created_at, decided_at, sent_message_id, error)`.
-- `send_rules(id, scope person|tag|kind, value, channels JSON, created_by, created_at, active)`: standing permissions to send.
+- `outbox(id 'o_<ulid>', status draft|approved|sending|sent|failed|rejected, target (person_id, conversation_id, handle_id, channel), payload JSON, authorized_by, reason, created_by, created_at, decided_at, sent_message_id, error, reconciled_at, target_snapshot JSON, send_started_sequence)`.
+- `send_rules(id, scope person|tag|kind, value, channels JSON, created_by, created_at, active, removed_by, removed_at)`: standing permissions to send.
 - `sync_state(channel, account_id, cursor, last_ok_at, last_error)`.
+- `sync_leases(channel, account_id, owner, expires_at)`: renewable cross-process poll ownership; the [adapter contract](ADAPTERS.md#sync-coordination-and-remaining-coverage) defines checkpoint/recovery behavior.
 
 ## 5. Channel interface
 ```ts
@@ -79,7 +80,7 @@ Embeddings ("the girl from the gym video") can be added later behind the same to
 
 ## 7. Send flow
 1. `send_message` takes a person ID, conversation ID or linked handle ID (deriving its person), an optional channel, the content, and optional `authorized_by` + `reason`.
-2. It resolves the target: an explicit conversation, otherwise that person's most recent conversation on the chosen channel, otherwise their newest handle on that channel. It refuses if the channel can't start a conversation (TikTok).
+2. It resolves the target: an explicit conversation, otherwise that person's most recent **direct** conversation on the chosen channel (groups require an explicit conversation ID), otherwise their newest handle on that channel. It refuses if the channel can't start a conversation (TikTok).
 3. Checks: the handle belongs to that person, the TikTok reply window is open, and the Instagram rate limit isn't hit.
 4. If `authorized_by` is given or a send rule matches, it sends straight away. Otherwise it creates a **draft** and returns the draft ID.
 5. A sent message is stored right away as outgoing and later matched to the copy the sync brings in.
@@ -87,7 +88,7 @@ Embeddings ("the girl from the gym video") can be added later behind the same to
 The result always echoes the resolved person, handle and channel, so the agent can double-check.
 
 ## 8. MCP tools
-`find_person`, `get_person`, `create_person`, `update_person`, `add_handle`, `change_handle`, `unlink_handle`, `link_handle`, `list_unlinked`, `list_link_suggestions`, `get_timeline`, `list_conversations`, `get_conversation`, `search_messages`, `send_message`, `list_drafts`, `approve_draft`, `reject_draft`, `add_send_rule`, `list_send_rules`, `sync_status`.
+`find_person`, `get_person`, `create_person`, `update_person`, `add_handle`, `change_handle`, `unlink_handle`, `link_handle`, `list_unlinked`, `list_link_suggestions`, `get_timeline`, `list_conversations`, `get_conversation`, `search_messages`, `send_message`, `list_drafts`, `approve_draft`, `reject_draft`, `add_send_rule`, `remove_send_rule`, `list_send_rules`, `sync_status`.
 
 ## 9. Build phases
 1. **Core and MCP:** repo, database and migrations, identity, handles with an edit log, resolver, outbox, all tools, and a fake channel. Offline tests.

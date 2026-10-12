@@ -52,9 +52,11 @@ Run these commands through the installed bin, or `node dist/cli.js …` from thi
 - Handles: `add_handle`, `change_handle`, `unlink_handle`, `link_handle`, `list_unlinked`, `list_link_suggestions`.
 - History: `get_timeline`, `list_conversations`, `get_conversation`, `search_messages`.
 - Outbox: `send_message`, `list_drafts`, `approve_draft`, `reject_draft`.
-- Permissions/status: `add_send_rule`, `list_send_rules`, `sync_status`.
+- Permissions/status: `add_send_rule`, `remove_send_rule`, `list_send_rules`, `sync_status`.
 
 Names resolve as exact > prefix > token > trigram. Only an exact match scoring at least 0.95 with at least a 0.2 margin is sendable; tools require selecting a person ID for ambiguous results. Sending defaults to a draft. Direct sends need `authorized_by` and `reason`, or a matching standing permission. Approval rechecks identity, channel capability, reply window and rate limits. Set `CONTACTS_CHANNELS=imessage` to enable the real adapter in every CLI mode, including stdio. Sending is never enabled by default.
+
+Agent workflow: `find_person` → inspect candidates and pick a person ID → `send_message`. Groups require an explicit `conversation_id`; choose `handle_id` and channel when routing matters. `get_conversation` returns the latest 100 messages by default and supplies `next_offset` for older pages. See [send safety and reconciliation](ADAPTERS.md#send-safety-and-failed-send-reconciliation) for approval snapshots, rule revocation and settled uncertain sends.
 
 ## Environment
 
@@ -93,7 +95,7 @@ node dist/cli.js sync imessage  # one backfill/reconcile, then exit
 node dist/cli.js serve          # sync + watch + MCP at http://127.0.0.1:8787/mcp
 ```
 
-HTTP clients must send `Authorization: Bearer <CONTACTS_HTTP_TOKEN>` on every request. The endpoint uses the SDK's stateless Streamable HTTP transport and the same 21 tools as stdio. Keep loopback binding for local use; use Tailscale Serve to expose it on the tailnet, or explicitly bind `CONTACTS_HTTP_HOST` to the machine's tailnet address. Do not expose it on a public interface.
+HTTP clients must send `Authorization: Bearer <CONTACTS_HTTP_TOKEN>` on every request. The endpoint uses the SDK's stateless Streamable HTTP transport and the same 22 tools as stdio. Keep loopback binding for local use; use Tailscale Serve to expose it on the tailnet, or explicitly bind `CONTACTS_HTTP_HOST` to the machine's tailnet address. Do not expose it on a public interface.
 
 Additional environment variables:
 
@@ -101,7 +103,7 @@ Additional environment variables:
 - `CONTACTS_IMSG_PATH`: binary path; defaults to `/opt/homebrew/bin/imsg`.
 - `CONTACTS_HTTP_HOST` / `CONTACTS_HTTP_PORT`: defaults `127.0.0.1` / `8787`.
 - `CONTACTS_HTTP_TOKEN`: required, nonempty bearer token for `serve`.
-- `CONTACTS_SYNC_INTERVAL_<CHANNEL>_MS`: delay after a completed sync pass. Defaults: iMessage `30000`, Instagram `300000`, email `120000`, TikTok `120000`. No overlapping polls for a channel within one process.
+- `CONTACTS_SYNC_INTERVAL_<CHANNEL>_MS`: delay after a completed sync pass. Defaults: iMessage `30000`, Instagram `300000`, email `120000`, TikTok `120000`. Renewable SQLite leases prevent overlapping polls for the same channel/account across upgraded processes.
 
 `sync_status` reports cursors, last completed successful sync and most recent error for each channel/account. A sync read failure preserves the last completed backfill page or incremental pass checkpoint. Live events ingest independently and never advance the backfill cursor; periodic sync fills watch gaps. Watch exits restart with exponential backoff capped at 60 seconds. Handles remain unlinked until there is exact identity proof. Routing diagnostics from imsg remain in raw metadata; the adapter uses account `default` because AppleScript cannot select a sending account.
 
@@ -126,7 +128,7 @@ History has no rowid pagination flag. Initial backfill uses 1000-message pages, 
 
 Versioned JSON cursors contain the maximum observed rowid, last successful scan's **start** time, and backfill progress while applicable. Numeric cursors migrate through one bounded backfill pass, emitting only rowids above the legacy cursor because a numeric cursor provides no safe timestamp to start from. Afterwards, each periodic pass lists chats once, selects chats using `last_message_at` with a ten-minute safety overlap, and streams only that date window. Missing/invalid activity dates include the chat conservatively. The explicit large limit prevents imsg's default 50-message limit from truncating an active window; it never requests an entire chat history in steady state. The timestamp advances only after all selected chats succeed, including empty passes. Overlap events are not filtered by rowid, so a racing lower-rowid insert in an already-scanned chat is recovered on the next pass. The ten-minute overlap covers recent insert races; historical imports dated outside it require a cursor reset/backfill. Saved cursors must also be reset if the underlying Messages database is restored/replaced. Message GUIDs deduplicate history and live copies; attachment metadata is retained without opening or copying attachment files. Some self-sent rows have no sender: they use the routed caller ID if present, otherwise `self@contacts-mcp.invalid`; missing inbound senders use a per-row unlinked placeholder. These placeholders are evidence gaps, not discovered people.
 
-Send accepts text and at most one absolute local attachment path or `file://` URL; remote attachment URLs, subjects, email routing and inline replies are rejected. Direct sends route by normalized phone/email, group sends resolve the stored portable chat GUID to its exact `chat.identifier`. The adapter takes a pre-send snapshot limited to 100 recent messages since one minute before the send begins, sends once, then polls the same bounded history window for a new outgoing row (matching the returned GUID when available). Timeout or an error after the mutation reports **uncertain; do not retry automatically**. Core retains a failed outbox entry with that diagnostic for manual reconciliation. History confirmation proves Messages recorded the outgoing row, not a recipient delivery/read receipt.
+Send accepts text and at most one absolute local attachment path or `file://` URL; remote attachment URLs, subjects, email routing and inline replies are rejected. Direct sends route by normalized phone/email, group sends resolve the stored portable chat GUID to its exact `chat.identifier`. The adapter takes a pre-send snapshot limited to 100 recent messages since one minute before the send begins, sends once, then polls the same bounded history window for a new outgoing row (matching the returned GUID when available). Timeout or an error after the mutation reports **uncertain; do not retry automatically**. Core retains a failed outbox entry with that diagnostic; later sync may settle it through the conservative reconciliation policy in ADAPTERS.md. History confirmation proves Messages recorded the outgoing row, not a recipient delivery/read receipt.
 
 ### launchd
 

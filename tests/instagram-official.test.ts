@@ -36,11 +36,16 @@ function fixtureHttp(recent = [message("m1"), message("m2", "2026-10-12T11:00:00
 async function collect(channel: ReturnType<typeof createInstagramOfficialChannel>, cursor?: string) {
   const result: IngestEvent[] = []; for await (const event of channel.sync(cursor)) result.push(event); return result;
 }
+it("keeps the official account's scoped ID and username out of messageable participants", async () => {
+  const f = fixtureHttp();
+  const events = await collect(createInstagramOfficialChannel(f.options));
+  expect(events.every(event => !event.participants!.includes(`igsid:${self}:${self}`) && !event.participants!.includes("excerlock"))).toBe(true);
+});
 it("maps IGSIDs, usernames, media, direction and raw data, and resumes by per-conversation IDs", async () => {
   const f = fixtureHttp(), channel = createInstagramOfficialChannel(f.options);
   const events = await collect(channel);
   expect(events).toHaveLength(2);
-  expect(events[0]).toMatchObject({ account_id: self, sender: `igsid:${self}:${peer}`, external_id: officialMessageId(self, "m1"), conversation_external_id: target.conversationExternalId, direction: "in", text: "Hello", participants: [`igsid:${self}:${self}`, "excerlock", `igsid:${self}:${peer}`, "alice"], attachments: [{ url: "https://example.invalid/image.jpg" }], raw: { transport: "official", message: { id: "m1" } } });
+  expect(events[0]).toMatchObject({ account_id: self, sender: `igsid:${self}:${peer}`, external_id: officialMessageId(self, "m1"), conversation_external_id: target.conversationExternalId, direction: "in", text: "Hello", participants: [`igsid:${self}:${peer}`, "alice"], attachments: [{ url: "https://example.invalid/image.jpg" }], raw: { transport: "official", message: { id: "m1" } } });
   expect(events[1].direction).toBe("out");
   const cursor = channel.getCursor()!;
   expect(JSON.parse(Buffer.from(cursor, "base64url").toString()).conversations[conversation.id].lastInboundAt).toBe("2026-10-12T10:00:00Z");
@@ -243,9 +248,10 @@ it("daemon runs due maintenance, retains refresh errors safely and drains mainte
   const maintenance = vi.spyOn(channel, "maintenance").mockRejectedValueOnce(new Error("safe refresh failure"));
   const registry = new ChannelRegistry([channel]);
   const core = new ContactsCore({ path: ":memory:", registry });
+  const records = vi.spyOn(core, "recordSync");
   const daemon = await startDaemon(core, registry, { port: 0, token: "offline", intervals: { instagram: 10 } });
   try {
-    await expect.poll(() => core.syncStatus()[0]?.last_error).toBe("Error: safe refresh failure");
+    await expect.poll(() => records.mock.calls.some(args => args[3]?.includes("safe refresh failure"))).toBe(true);
     await expect.poll(() => core.syncStatus()[0]?.last_ok_at).toBeTruthy();
     expect(maintenance.mock.calls.length).toBeGreaterThanOrEqual(2);
   } finally { await daemon.close(); core.close(); }

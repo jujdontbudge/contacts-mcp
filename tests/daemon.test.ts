@@ -33,7 +33,7 @@ it("requires a token at startup and rejects unauthenticated HTTP requests", asyn
           requestInit: { headers: { Authorization: "Bearer offline-secret" } },
         }),
       );
-      expect((await client.listTools()).tools).toHaveLength(21);
+      expect((await client.listTools()).tools).toHaveLength(22);
       const result = await client.callTool({
         name: "create_person",
         arguments: { display_name: "HTTP Alice" },

@@ -65,6 +65,7 @@ export class ContactsCore {
   ingest(event: IngestEvent) {
     return this.store.db.transaction(() => {
       const message = this.conversations.ingest(event);
+      this.outbox.reconcileFailed(message);
       for (const raw of [event.sender, ...(event.participants ?? [])]) {
         const handle = this.handles.ensure(
           event.channel,
@@ -111,6 +112,28 @@ export class ContactsCore {
       channel,
       account,
     );
+  }
+  /** Renewable cross-process lease: SQLite owns the coordination, not a process mutex. */
+  acquireSyncLease(channel: ChannelId, account: string, owner: string, ttlMs = 60_000): boolean {
+    const now = Date.now();
+    return this.store.db.transaction(() => {
+      this.store.run(
+        "INSERT INTO sync_leases VALUES (?,?,?,?) ON CONFLICT(channel,account_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE sync_leases.expires_at<=? OR sync_leases.owner=excluded.owner",
+        channel, account, owner, now + ttlMs, now,
+      );
+      return !!this.store.one("SELECT 1 FROM sync_leases WHERE channel=? AND account_id=? AND owner=?", channel, account, owner);
+    }).immediate();
+  }
+  renewSyncLease(channel: ChannelId, account: string, owner: string): boolean {
+    const now = Date.now();
+    this.store.run("UPDATE sync_leases SET expires_at=? WHERE channel=? AND account_id=? AND owner=? AND expires_at>?", now + 60_000, channel, account, owner, now);
+    return this.hasSyncLease(channel, account, owner);
+  }
+  hasSyncLease(channel: ChannelId, account: string, owner: string): boolean {
+    return !!this.store.one("SELECT 1 FROM sync_leases WHERE channel=? AND account_id=? AND owner=? AND expires_at>?", channel, account, owner, Date.now());
+  }
+  releaseSyncLease(channel: ChannelId, account: string, owner: string): void {
+    this.store.run("DELETE FROM sync_leases WHERE channel=? AND account_id=? AND owner=?", channel, account, owner);
   }
   ingestSynced(event: IngestEvent, cursor: string | null): void {
     this.store.db.transaction(() => {

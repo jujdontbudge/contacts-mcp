@@ -7,22 +7,19 @@ export function openDatabase(
 ): Database.Database {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
+  db.pragma("busy_timeout = 5000");
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
   db.exec(
     "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
   );
   migrations.forEach((sql, index) => {
-    if (
-      !db
-        .prepare("SELECT 1 FROM schema_migrations WHERE version=?")
-        .get(index + 1)
-    )
-      db.transaction(() => {
+    db.transaction(() => {
+      if (!db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(index + 1)) {
         db.exec(sql);
         db.prepare("INSERT INTO schema_migrations VALUES (?)").run(index + 1);
-      })();
+      }
+    }).immediate();
   });
   return db;
 }

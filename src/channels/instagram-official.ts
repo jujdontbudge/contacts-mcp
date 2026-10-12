@@ -158,7 +158,8 @@ export function createInstagramOfficialChannel(opts: InstagramOfficialOptions = 
     return {
       channel: "instagram", account_id: channel.accountId!, external_id: officialMessageId(self, m.id),
       conversation_external_id: conversationId, kind: "direct", title: peer.username,
-      participants: [...new Set(c.participants.data.flatMap(p => [scopedHandle(self, p.id), ...(p.username ? [normalizeHandle("instagram", p.username)] : [])]))],
+      participants: [...new Set(c.participants.data.filter(p => p.id !== self).flatMap(p => [scopedHandle(self, p.id), ...(p.username ? [normalizeHandle("instagram", p.username)] : [])]))],
+      own_handles: [scopedHandle(self, self), ...c.participants.data.filter(p => p.id === self && p.username).map(p => normalizeHandle("instagram", p.username!))],
       sender: scopedHandle(self, m.from.id), direction, sent_at: new Date(m.created_time).toISOString(), text: m.message ?? "",
       attachments: m.attachments?.data.flatMap(a => { const url = a.image_data?.url ?? a.video_data?.url ?? a.file_url; return url ? [{ url, mimeType: a.mime_type, name: a.name }] : []; }),
       raw: { transport: "official", conversation: c, message: m },

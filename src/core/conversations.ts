@@ -45,12 +45,30 @@ export class Conversations {
           conversation.id,
           h.id,
         );
+      // Adapter-proven aliases also remove pollution left by older versions.
+      // Preserve a deliberate self-chat: cleanup needs at least one external peer.
+      if (event.own_handles?.length) {
+        const own = event.own_handles.map(value => this.handles.ensure(event.channel, event.account_id, value));
+        const ownIds = new Set(own.map(handle => handle.id));
+        const participants = this.s.all<{ handle_id: string }>("SELECT handle_id FROM conversation_participants WHERE conversation_id=?", conversation.id);
+        if (participants.some(participant => !ownIds.has(participant.handle_id)))
+          for (const handle of own) this.s.run("DELETE FROM conversation_participants WHERE conversation_id=? AND handle_id=?", conversation.id, handle.id);
+      }
       const existing = this.s.one<Message>(
         "SELECT * FROM messages WHERE channel=? AND external_id=?",
         event.channel,
         event.external_id,
       );
       if (existing) {
+        const original = this.get(existing.conversation_id);
+        if (original.account_id !== event.account_id)
+          throw new Error("External message ID has conflicting account");
+        const proof = (existing.raw as { contacts_platform_message_id?: string } | null)?.contacts_platform_message_id ??
+          (event.raw as { contacts_platform_message_id?: string } | null)?.contacts_platform_message_id;
+        const provenPlatformMove = event.channel === "instagram" && proof && event.external_id.startsWith("ig:") && event.external_id.endsWith(`:message:${encodeURIComponent(proof)}`);
+        if (existing.conversation_id !== conversation.id && event.channel !== "email" && !provenPlatformMove &&
+            (existing.raw as { source?: string } | null)?.source !== "outbox")
+          throw new Error("External message ID has conflicting conversation");
         // Replace the locally recorded outgoing copy with canonical sync metadata.
         if (existing.direction !== event.direction)
           throw new Error("External message ID has conflicting direction");
@@ -311,7 +329,7 @@ export class Conversations {
     title?: string,
   ): Conversation {
     this.s.run(
-      "INSERT INTO conversations VALUES (?,?,?,?,?,?) ON CONFLICT(channel,account_id,external_id) DO UPDATE SET kind=excluded.kind,title=COALESCE(excluded.title,conversations.title)",
+      "INSERT INTO conversations VALUES (?,?,?,?,?,?) ON CONFLICT(channel,account_id,external_id) DO UPDATE SET kind=CASE WHEN conversations.kind='group' THEN 'group' ELSE excluded.kind END,title=COALESCE(excluded.title,conversations.title)",
       this.s.id("c"),
       channel,
       account,
@@ -334,18 +352,26 @@ export class Conversations {
     if (!c) throw new Error("Conversation not found");
     return c;
   }
-  detail(id: string) {
+  detail(id: string, limit?: number, offset = 0) {
     return {
       ...this.get(id),
+      total_messages: this.s.one<{ count: number }>("SELECT COUNT(*) AS count FROM messages WHERE conversation_id=?", id)!.count,
       participants: this.s.all(
         "SELECT h.* FROM handles h JOIN conversation_participants cp ON cp.handle_id=h.id WHERE cp.conversation_id=?",
         id,
       ),
       messages: this.s.all<Message>(
-        "SELECT * FROM messages WHERE conversation_id=? ORDER BY sent_at,id",
+        "SELECT m.* FROM messages m WHERE m.id IN (SELECT id FROM messages WHERE conversation_id=? ORDER BY sent_at DESC,rowid DESC LIMIT ? OFFSET ?) ORDER BY m.sent_at,m.rowid",
         id,
+        limit ?? -1,
+        offset,
       ),
     };
+  }
+  message(id: string): Message {
+    const message = this.s.one<Message>("SELECT * FROM messages WHERE id=?", id);
+    if (!message) throw new Error("Message not found");
+    return message;
   }
   list(person_id?: string, channel?: ChannelId): Conversation[] {
     return this.s.all<Conversation>(

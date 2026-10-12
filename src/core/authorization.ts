@@ -11,7 +11,7 @@ export class Authorization {
   }): SendRule {
     const id = this.s.id("sr");
     this.s.run(
-      "INSERT INTO send_rules VALUES (?,?,?,?,?,?,?)",
+      "INSERT INTO send_rules (id,scope,value,channels,created_by,created_at,active) VALUES (?,?,?,?,?,?,?)",
       id,
       input.scope,
       input.value,
@@ -24,6 +24,18 @@ export class Authorization {
   }
   list(): SendRule[] {
     return this.s.all("SELECT * FROM send_rules ORDER BY created_at,id");
+  }
+  remove(id: string, actor: string): SendRule {
+    if (!actor.trim()) throw new Error("Rule removal requires an actor");
+    return this.s.db.transaction(() => {
+      if (!this.s.one("SELECT 1 FROM send_rules WHERE id=?", id))
+        throw new Error("Send rule not found");
+      this.s.run(
+        "UPDATE send_rules SET active=0,removed_by=?,removed_at=? WHERE id=? AND active=1",
+        actor, this.s.now(), id,
+      );
+      return this.s.one<SendRule>("SELECT * FROM send_rules WHERE id=?", id)!;
+    }).immediate();
   }
   match(
     person: Person,

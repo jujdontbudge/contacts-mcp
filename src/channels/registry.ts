@@ -73,7 +73,7 @@ export async function configuredChannels(
             "default")
           : id === "email"
             ? (adapters.email?.accountId ?? "default")
-            : "default";
+            : (adapters.imessage?.accountId ?? "default");
     if (!ids.includes(id)) {
       registry.disabled.set(id, {
         account_id: account,

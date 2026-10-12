@@ -29,6 +29,8 @@ export interface IngestEvent {
   kind?: "direct" | "group";
   title?: string;
   participants?: string[];
+  /** Proven sending-account aliases, used to repair legacy participant pollution. */
+  own_handles?: string[];
   sender: string;
   direction: "in" | "out";
   sent_at: string;
@@ -45,6 +47,8 @@ export interface Channel {
   id: ChannelId;
   /** The account whose sync cursor this adapter consumes. */
   accountId?: string;
+  /** Resolve a configured/unique account before taking its durable sync lease. */
+  resolveAccountId?(): Promise<string>;
   getCursor?(): string | undefined;
   /** Bounded background maintenance, e.g. refresh credentials when due. */
   maintenance?(): Promise<void>;
@@ -73,9 +77,11 @@ export interface Channel {
 export function normalizeHandle(channel: ChannelId, raw: string): string {
   const value = raw.trim();
   if (!value) throw new Error("Handle cannot be empty");
+  if ((channel === "tiktok" && /^tiktok:(user|account):/.test(value)) ||
+      (channel === "instagram" && /^(beeper:user:|igsid:)/.test(value))) return value;
   if (channel === "imessage" && !value.includes("@")) {
-    const phone = parsePhoneNumberFromString(value, "US");
-    if (!phone?.isValid())
+    const phone = parsePhoneNumberFromString(value, { defaultCountry: "US", extract: false });
+    if (!phone?.isValid() || phone.ext)
       throw new Error("Invalid phone number; provide E.164 or a US number");
     return phone.number;
   }

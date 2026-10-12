@@ -70,7 +70,10 @@ export function tools(core: ContactsCore) {
       description:
         "Resolve a name, alias, phone, email, username or system:external_id. Only a unique exact match is sendable; ambiguous results require selecting an explicit person_id.",
       schema: z.object({ query: id }),
-      call: ({ query }: { query: string }) => core.resolver.find(query),
+      call: ({ query }: { query: string }) => {
+        const result = core.resolver.find(query);
+        return { ...result, candidates: result.candidates.map(candidate => ({ ...candidate, last_message: candidate.last_message ? messageOutput(candidate.last_message) : null })) };
+      },
     },
     get_person: {
       description:
@@ -198,18 +201,23 @@ export function tools(core: ContactsCore) {
     },
     get_conversation: {
       description:
-        "Read a conversation with participants and chronological messages.",
-      schema: z.object({ conversation_id: id, include_raw }),
+        "Read participants and the latest messages (100 by default), ordered chronologically. Use next_offset as offset to page backward through older history; next_offset is null when exhausted. Raw provider payloads are omitted by default.",
+      schema: z.object({ conversation_id: id, include_raw, limit, offset: z.number().int().min(0).default(0) }),
       call: ({
         conversation_id,
         include_raw,
+        limit,
+        offset,
       }: {
         conversation_id: string;
         include_raw?: boolean;
+        limit?: number;
+        offset?: number;
       }) => {
-        const detail = core.conversations.detail(conversation_id);
+        const detail = core.conversations.detail(conversation_id, limit ?? 100, offset ?? 0);
         return {
           ...detail,
+          next_offset: (offset ?? 0) + detail.messages.length < detail.total_messages ? (offset ?? 0) + detail.messages.length : null,
           messages: detail.messages.map((m) => messageOutput(m, include_raw)),
         };
       },
@@ -237,7 +245,7 @@ export function tools(core: ContactsCore) {
     },
     send_message: {
       description:
-        "Draft by default. Send directly only with authorized_by plus reason or a matching standing rule. Use an explicit person_id, conversation_id, or linked handle_id, never an ambiguous name. Checks identity, capabilities, reply window and rate limit. Echoes resolved person/handle/channel.",
+        "First find_person, inspect candidates, pick a person_id (or verified linked handle_id), then send_message. Draft by default; sends immediately only with owner authorization via authorized_by plus reason or a standing rule. Person-only sends select a direct chat; groups REQUIRE explicit conversation_id. Specify channel/handle to control routing. Email To must include that handle; CC/BCC are explicit, never inherited. Echoes recipient/channel/status. Failed or uncertain sends are reconciled from sync evidence, never automatically retried; inspect history before creating another send.",
       schema: z
         .object({
           ...content,
@@ -268,9 +276,7 @@ export function tools(core: ContactsCore) {
           return result;
         return {
           ...result,
-          message: core.conversations
-            .detail(result.conversation_id)
-            .messages.find((m) => m.id === result.sent_message_id),
+          message: core.conversations.message(result.sent_message_id),
         };
       },
     },
@@ -312,6 +318,11 @@ export function tools(core: ContactsCore) {
       description: "List standing send permissions, including inactive rules.",
       schema: z.object({}),
       call: () => core.authorization.list(),
+    },
+    remove_send_rule: {
+      description: "Deactivate a standing send permission by rule_id and record the actor/time. Preserves the rule and past authorizations; repeated removal retains the first removal audit. Later messages no longer match it.",
+      schema: z.object({ rule_id: id, actor }),
+      call: (args: { rule_id: string; actor: string }) => core.authorization.remove(args.rule_id, args.actor),
     },
     sync_status: {
       description:

@@ -31,6 +31,7 @@ export class Store {
       "tags",
       "channels",
       "payload",
+      "target_snapshot",
       "email_to",
       "email_cc",
       "email_bcc",

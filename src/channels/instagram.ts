@@ -120,7 +120,7 @@ export function createInstagramChannel(
       );
     return selected;
   }
-  const handle = (raw: string) => normalizeHandle("instagram", raw);
+  const handle = (raw: string) => raw.trim().startsWith("beeper:user:") ? raw.trim() : normalizeHandle("instagram", raw);
   function username(user: User): string {
     if (!user.username)
       throw new Error(
@@ -129,13 +129,15 @@ export function createInstagramChannel(
     return handle(user.username);
   }
   function map(chat: Chat, message: Message, self: Account): IngestEvent {
+    if (typeof message.id !== "string" || !message.id) throw new Error("Beeper message has no stable ID");
     if (message.accountID !== self.accountID || message.chatID !== chat.id)
       throw new Error("Beeper message account/chat mismatch");
     const sender =
       message.isSender || message.senderID === self.user.id
         ? self.user
         : chat.participants.items.find((u) => u.id === message.senderID);
-    if (!sender) throw new Error(`Unknown Beeper sender ${message.senderID}`);
+    const identity = (user: User) => user.username?.trim() ? username(user) : `beeper:user:${encodeURIComponent(self.accountID)}:${encodeURIComponent(user.id)}`;
+    if (!sender && !message.senderID) throw new Error("Beeper message has no sender identity");
     return {
       channel: "instagram",
       account_id: self.accountID,
@@ -148,10 +150,11 @@ export function createInstagramChannel(
         ...new Set(
           chat.participants.items
             .filter((u) => !u.isSelf && u.id !== self.user.id)
-            .map(username),
+            .map(identity),
         ),
       ],
-      sender: username(sender),
+      sender: identity(sender ?? { id: message.senderID! }),
+      own_handles: [...new Set([self.user, ...chat.participants.items.filter(u => u.isSelf || u.id === self.user.id)].map(identity))],
       direction:
         message.isSender || message.senderID === self.user.id ? "out" : "in",
       sent_at: new Date(message.timestamp).toISOString(),
@@ -169,6 +172,9 @@ export function createInstagramChannel(
   }
   async function fullChat(id: string): Promise<Chat> {
     const chat = await client.chats.retrieve(id, { maxParticipantCount: -1 });
+    if (chat.id !== id) throw new Error("Beeper chat identity mismatch");
+    if (!Array.isArray(chat.participants?.items) || chat.participants.items.some(u => typeof u.id !== "string" || !u.id))
+      throw new Error("Beeper participants have incomplete identities");
     if (chat.participants.hasMore)
       throw new Error("Beeper returned incomplete participants");
     if (chat.merge)
@@ -177,10 +183,12 @@ export function createInstagramChannel(
   }
   return {
     id: "instagram",
+    accountId: configured,
+    resolveAccountId: async () => (await account()).accountID,
     capabilities: { startConversation: true, groups: true, cc: false },
     normalizeHandle: handle,
     getCursor: () => cursorString,
-    async *sync(encoded) {
+    async *sync(encoded, checkpoint) {
       const self = await account();
       const state = decodeCursor(encoded, self.accountID);
       cursorString = encodeCursor(state);
@@ -206,6 +214,7 @@ export function createInstagramChannel(
             timestamp: message.timestamp,
           };
           cursorString = encodeCursor(state);
+          checkpoint?.(cursorString);
           await opts.onCursor?.(cursorString);
         }
       }
@@ -228,6 +237,8 @@ export function createInstagramChannel(
       if (!target.conversationExternalId && target.conversationKind === "group")
         throw new Error("Group sends require a chat ID");
       const requested = handle(target.handle);
+      if (!/^[a-z0-9._]{1,30}$/i.test(requested))
+        throw new Error("Instagram sends require a verified username, not an opaque identity");
       let chat: Chat;
       if (target.conversationExternalId)
         chat = await fullChat(target.conversationExternalId);
@@ -240,11 +251,11 @@ export function createInstagramChannel(
           accountIDs: [self.accountID],
         } as ChatListParams)) {
           if (++scanned > 300) break;
-          if (c.type !== "single") continue;
+          if (c.type !== "single" || c.accountID !== self.accountID || c.merge || c.isReadOnly) continue;
           const full = await fullChat(c.id);
           if (
             full.participants.items.some(
-              (u) => !u.isSelf && !!u.username && username(u) === requested,
+              (u) => !u.isSelf && u.id !== self.user.id && !!u.username && username(u) === requested,
             )
           ) {
             existing = full;
@@ -266,7 +277,7 @@ export function createInstagramChannel(
             );
           }
           const matches = items.filter(
-            (u) => u.username && username(u) === requested && !u.isSelf,
+            (u) => u.username && username(u) === requested && !u.isSelf && u.id !== self.user.id,
           );
           if (
             matches.length !== 1 ||
@@ -291,6 +302,10 @@ export function createInstagramChannel(
         throw new Error("Unsafe or read-only Beeper chat");
       if (!target.conversationExternalId && chat.type !== "single")
         throw new Error("Expected a direct chat");
+      if (target.conversationKind && (chat.type === "group" ? "group" : "direct") !== target.conversationKind)
+        throw new Error("Instagram conversation kind changed; verify the chat before sending");
+      if (chat.type === "group" && !chat.participants.items.some(u => !u.isSelf && u.id !== self.user.id && u.username && username(u) === requested))
+        throw new Error("Selected Instagram handle is no longer a verified group participant");
       if (chat.type === "single") {
         const recipients = chat.participants.items.filter(
           (u) => !u.isSelf && u.id !== self.user.id,
@@ -329,26 +344,29 @@ export function createInstagramChannel(
             // Beeper swaps the pending ID for the network's final ID once delivered,
             // after which the pending ID 404s. Find our message in the chat instead.
             let scanned = 0;
+            const candidates: Message[] = [];
             for await (const m of client.messages.list(chat.id)) {
               if (++scanned > 20) break;
               if (
                 m.isSender &&
+                m.accountID === self.accountID && m.chatID === chat.id &&
                 m.text === content.text &&
-                Date.parse(m.timestamp) >= sendStartedAt - 60_000 &&
-                m.sendStatus?.status !== "FAIL_PERMANENT" &&
-                m.sendStatus?.status !== "FAIL_RETRIABLE"
+                Date.parse(m.timestamp) >= sendStartedAt - 1000 &&
+                (!m.sendStatus || m.sendStatus.status === "SUCCESS")
               )
-                return {
-                  externalId: external(chat.id, m.id),
-                  conversationExternalId: chat.id,
-                };
+                candidates.push(m);
             }
+            if (candidates.length === 1) return { externalId: external(chat.id, candidates[0].id), conversationExternalId: chat.id };
             continue;
           }
           throw error;
         }
         if (message.chatID !== chat.id || message.accountID !== self.accountID)
           throw new Error("Beeper confirmation account/chat mismatch");
+        if (typeof message.id !== "string" || !message.id)
+          throw new Error("Beeper confirmation has no stable ID; reconcile manually");
+        if (!(message.isSender || message.senderID === self.user.id) || message.text !== content.text)
+          throw new Error("Beeper confirmation sender/text mismatch; reconcile manually");
         if (
           message.sendStatus?.status === "FAIL_PERMANENT" ||
           message.sendStatus?.status === "FAIL_RETRIABLE"
@@ -372,7 +390,7 @@ export function createInstagramChannel(
         `Instagram send not confirmed (pending ID ${sent.pendingMessageID}); reconcile manually`,
       );
     },
-    live(onEvent) {
+    live(onEvent, onError) {
       if (!token && !opts.socketFactory)
         throw new Error("BEEPER_ACCESS_TOKEN is required for live events");
       let stopped = false;
@@ -383,7 +401,11 @@ export function createInstagramChannel(
       const url = new URL(baseURL);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.pathname = `${url.pathname.replace(/\/$/, "")}/v1/ws`;
-      const report = (error: unknown) => opts.onError?.(error);
+      const report = (error: unknown) => {
+        if (stopped) return;
+        opts.onError?.(error);
+        onError?.(error instanceof Error ? error : new Error(String(error)));
+      };
       const retry = () => {
         if (stopped || timer) return;
         const delay = Math.min(

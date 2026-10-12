@@ -6,7 +6,7 @@ import { createContactsSystem } from "./composition.js";
 import { loadEnvFile } from "node:process";
 import { existsSync } from "node:fs";
 import { createServer } from "./mcp/server.js";
-import { startDaemon, startSyncLoops, syncChannel } from "./daemon.js";
+import { startDaemon, startSyncLoops, syncChannels } from "./daemon.js";
 async function main(): Promise<void> {
   const [command, action, ...args] = process.argv.slice(2);
   const envPath = fileURLToPath(new URL("../.env", import.meta.url));
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
         : registry.list();
       if (!channels.length)
         throw new Error("No channels enabled; set CONTACTS_CHANNELS");
-      for (const channel of channels) await syncChannel(core, channel);
+      await syncChannels(core, channels);
       console.log(JSON.stringify(core.syncStatus(), null, 2));
     } finally {
       core.close();

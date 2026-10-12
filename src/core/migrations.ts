@@ -20,4 +20,12 @@ CREATE INDEX outbox_rate ON outbox(channel,status,decided_at);
   // Repair: remove our own sending accounts from conversation participants (they were
   // added as the sender of outgoing messages), except in a chat with ourselves.
   `DELETE FROM conversation_participants WHERE handle_id IN (SELECT DISTINCT sender_handle_id FROM messages WHERE direction='out' AND sender_handle_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM conversations c JOIN handles h ON h.id=conversation_participants.handle_id WHERE c.id=conversation_participants.conversation_id AND instr(c.external_id, h.value_normalized) > 0);`,
+  `ALTER TABLE send_rules ADD COLUMN removed_by TEXT;
+ALTER TABLE send_rules ADD COLUMN removed_at TEXT;
+ALTER TABLE outbox ADD COLUMN reconciled_at TEXT;
+ALTER TABLE outbox ADD COLUMN target_snapshot TEXT;
+ALTER TABLE outbox ADD COLUMN send_started_sequence INTEGER;
+CREATE INDEX outbox_reconcile ON outbox(channel,status,conversation_id);
+CREATE INDEX messages_conversation_time ON messages(conversation_id,sent_at);
+CREATE TABLE sync_leases(channel TEXT NOT NULL, account_id TEXT NOT NULL, owner TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(channel,account_id));`,
 ];

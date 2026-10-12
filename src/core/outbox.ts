@@ -9,7 +9,7 @@ import { Identity } from "./identity.js";
 import { Handles } from "./handles.js";
 import { Conversations } from "./conversations.js";
 import { Authorization } from "./authorization.js";
-import type { Conversation, Handle, Outbox, SendRequest } from "./types.js";
+import type { Handle, Message, Outbox, SendRequest } from "./types.js";
 export interface DispatchHooks {
   send?: (
     id: string,
@@ -34,6 +34,7 @@ export class OutboxService {
       SendRequest,
       "person_id" | "conversation_id" | "handle_id" | "channel"
     >,
+    implicitConversation = true,
   ): SendTarget {
     let conversation = input.conversation_id
       ? this.conversations.get(input.conversation_id)
@@ -66,7 +67,7 @@ export class OutboxService {
     if (explicit && explicit.person_id !== personId)
       throw new Error("Handle does not belong to person");
     let channel = conversation?.channel ?? input.channel ?? explicit?.channel;
-    if (!conversation) {
+    if (!conversation && implicitConversation) {
       conversation = this.conversations
         .list(personId, channel)
         // Never pick a group implicitly: messaging a group needs an explicit conversation_id.
@@ -132,8 +133,43 @@ export class OutboxService {
   }
   private checks(target: SendTarget, content: SendContent, rate = true): void {
     const channel = this.registry.get(target.channel);
-    if (this.handles.get(target.handle_id).person_id !== target.person_id)
+    const handle = this.handles.get(target.handle_id);
+    let normalized: string;
+    try { normalized = this.registry.normalize(handle.channel, handle.value_raw); }
+    catch { throw new Error("Stored handle normalization changed; review the raw value with change_handle before sending"); }
+    if (normalized !== handle.value_normalized)
+      throw new Error("Stored handle normalization changed; verify identity and use change_handle before sending");
+    if (handle.person_id !== target.person_id)
       throw new Error("Handle no longer belongs to person");
+    if (handle.value_normalized !== target.handle || handle.account_id !== target.account_id || handle.channel !== target.channel)
+      throw new Error("Selected handle changed; verify the recipient and create a new draft");
+    if (channel.accountId && channel.accountId !== target.account_id)
+      throw new Error("Handle account does not match the configured sending account");
+    if (target.conversation_id) {
+      const conversation = this.conversations.get(target.conversation_id);
+      if (conversation.kind !== target.conversationKind || conversation.account_id !== target.account_id || conversation.external_id !== target.conversationExternalId)
+        throw new Error("Selected conversation changed; verify the target and create a new draft");
+    }
+    if (content.email_to?.length && target.channel !== "email")
+      throw new Error("Channel does not support email recipients");
+    if (target.channel === "email" && content.email_to?.length &&
+        !content.email_to.some(value => this.registry.normalize("email", value) === target.handle))
+      throw new Error("email_to must include the selected handle; choose the correct person/handle first");
+    if (content.reply_to_external_id) {
+      let reply = this.s.one<{ conversation_id: string }>(
+        "SELECT conversation_id FROM messages WHERE channel=? AND external_id=?",
+        target.channel, content.reply_to_external_id,
+      );
+      if (!reply && target.channel === "email") {
+        const event = this.conversations.lookupEvent("email", content.reply_to_external_id);
+        if (event?.account_id === target.account_id) reply = this.s.one(
+          "SELECT id AS conversation_id FROM conversations WHERE channel='email' AND account_id=? AND external_id=?",
+          target.account_id, event.conversation_external_id,
+        );
+      }
+      if (!reply || reply.conversation_id !== target.conversation_id)
+        throw new Error("Reply message must belong to the selected conversation");
+    }
     if (!target.conversation_id && !channel.capabilities.startConversation)
       throw new Error("Channel cannot start a conversation");
     if (target.conversationKind === "group" && !channel.capabilities.groups)
@@ -149,7 +185,7 @@ export class OutboxService {
         target.conversation_id ?? null,
       );
       if (
-        !last ||
+        !last || !Number.isFinite(Date.parse(last.sent_at)) || this.s.clock().getTime() < Date.parse(last.sent_at) ||
         this.s.clock().getTime() - Date.parse(last.sent_at) >=
           (target.channel === "instagram" &&
           content.metadata?.instagram_tag === "HUMAN_AGENT"
@@ -216,11 +252,11 @@ export class OutboxService {
     const authorized_by =
       input.authorized_by ?? (rule ? rule.created_by : null);
     const reason =
-      input.reason ??
-      (rule ? `Standing rule ${rule.id} (${rule.scope}:${rule.value})` : null);
+      input.authorized_by ? input.reason! :
+      (rule ? `Standing rule ${rule.id} (${rule.scope}:${rule.value})${input.reason ? `; ${input.reason}` : ""}` : input.reason ?? null);
     const id = this.s.id("o");
     this.s.run(
-      "INSERT INTO outbox (id,status,person_id,conversation_id,handle_id,channel,payload,authorized_by,reason,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO outbox (id,status,person_id,conversation_id,handle_id,channel,payload,authorized_by,reason,created_by,created_at,target_snapshot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
       id,
       "draft",
       target.person_id,
@@ -232,8 +268,9 @@ export class OutboxService {
       reason,
       input.created_by,
       this.s.now(),
+      JSON.stringify(target),
     );
-    if (authorized_by) return this.dispatch(id, authorized_by, reason!);
+    if (authorized_by) return this.dispatch(id, authorized_by, reason!, input.authorized_by ? undefined : rule?.id);
     return this.result(this.get(id), target);
   }
   get(id: string): Outbox {
@@ -278,6 +315,10 @@ export class OutboxService {
     });
   }
   private result(o: Outbox, target: SendTarget) {
+    if (o.conversation_id && o.conversation_id !== target.conversation_id) {
+      const conversation = this.conversations.get(o.conversation_id);
+      target = { ...target, conversation_id: conversation.id, conversationExternalId: conversation.external_id, conversationKind: conversation.kind };
+    }
     return {
       ...o,
       person: this.identity.get(target.person_id),
@@ -286,7 +327,7 @@ export class OutboxService {
       target,
     };
   }
-  private async dispatch(id: string, actor: string, reason: string) {
+  private async dispatch(id: string, actor: string, reason: string, ruleId?: string) {
     const o = this.get(id);
     if (o.status !== "draft")
       throw new Error("Only draft messages can be approved/sent");
@@ -295,11 +336,21 @@ export class OutboxService {
       conversation_id: o.conversation_id ?? undefined,
       handle_id: o.handle_id,
       channel: o.channel,
-    });
+    }, false);
+    if (o.target_snapshot && JSON.stringify(target) !== JSON.stringify(o.target_snapshot))
+      throw new Error("Draft target changed; create a new draft after verifying the recipient");
+    if (!o.target_snapshot && this.s.one(
+      "SELECT 1 FROM handle_events WHERE handle_id=? AND action IN ('change','link','unlink') AND at>=?",
+      o.handle_id, o.created_at,
+    )) throw new Error("Legacy draft handle changed; create a new draft after verifying the recipient");
     // Reserve the slot transactionally before awaiting the external adapter.
-    this.s.db.transaction(() => {
+    const reserved = this.s.db.transaction(() => {
       if (this.get(id).status !== "draft")
         throw new Error("Draft already claimed");
+      if (ruleId && !this.s.one("SELECT 1 FROM send_rules WHERE id=? AND active=1", ruleId)) {
+        this.s.run("UPDATE outbox SET authorized_by=NULL,reason=NULL WHERE id=?", id);
+        return false;
+      }
       this.checks(target, o.payload);
       this.s.run(
         "UPDATE outbox SET status='approved',authorized_by=?,reason=?,decided_at=? WHERE id=?",
@@ -308,8 +359,10 @@ export class OutboxService {
         this.s.now(),
         id,
       );
-      this.s.run("UPDATE outbox SET status='sending' WHERE id=?", id);
-    })();
+      this.s.run("UPDATE outbox SET status='sending',send_started_sequence=(SELECT COALESCE(MAX(rowid),0) FROM messages) WHERE id=?", id);
+      return true;
+    }).immediate();
+    if (!reserved) return this.result(this.get(id), target);
     let sent: { externalId: string; conversationExternalId: string };
     try {
       sent = await (this.hooks.send
@@ -317,10 +370,16 @@ export class OutboxService {
         : this.registry.get(target.channel).send(target, o.payload));
     } catch (error) {
       this.s.run(
-        "UPDATE outbox SET status='failed',error=? WHERE id=?",
+        "UPDATE outbox SET status='failed',error=? WHERE id=? AND status='sending'",
         String(error),
         id,
       );
+      // Live ingestion may have raced ahead of the adapter's uncertain result.
+      const matches = this.s.all<Message>(
+        "SELECT * FROM messages WHERE channel=? AND direction='out' AND text=? AND sent_at>=?",
+        o.channel, o.payload.text, o.decided_at ?? this.get(id).decided_at ?? o.created_at,
+      );
+      if (matches.length === 1) this.reconcileFailed(matches[0]);
       return this.result(this.get(id), target);
     }
     // Keep 'sending' on a persistence failure: a real send must never be retried blindly.
@@ -340,8 +399,9 @@ export class OutboxService {
         id: string;
         direction: string;
         conversation_id: string;
+        sequence: number;
       }>(
-        "SELECT id,direction,conversation_id FROM messages WHERE channel=? AND external_id=?",
+        "SELECT id,direction,conversation_id,rowid AS sequence FROM messages WHERE channel=? AND external_id=?",
         target.channel,
         sent.externalId,
       );
@@ -351,6 +411,9 @@ export class OutboxService {
           existing.conversation_id !== conversation.id)
       )
         throw new Error("Confirmed send conflicts with ingested message");
+      const startedSequence = this.get(id).send_started_sequence;
+      if (existing && startedSequence !== null && existing.sequence <= startedSequence)
+        throw new Error("Confirmed send reused a message stored before dispatch; reconcile manually");
       const messageId = existing?.id ?? this.s.id("m");
       if (!existing)
         this.s.run(
@@ -383,5 +446,39 @@ export class OutboxService {
     })();
     await this.hooks.afterSent?.(id);
     return this.result(this.get(id), target);
+  }
+
+  /** Evidence only: never dispatches or retries. Ambiguous fingerprints stay failed. */
+  reconcileFailed(message: Message): void {
+    this.s.db.transaction(() => this.reconcileMessage(message)).immediate();
+  }
+  private reconcileMessage(message: Message): void {
+    if (message.direction !== "out" || !message.text.trim()) return;
+    const provider = (message.raw as { message?: { sendStatus?: { status?: string } } } | null)?.message;
+    if (provider?.sendStatus && provider.sendStatus.status !== "SUCCESS") return;
+    if (this.s.one("SELECT 1 FROM outbox WHERE sent_message_id=?", message.id)) return;
+    const conversation = this.conversations.get(message.conversation_id);
+    const sequence = this.s.one<{ sequence: number }>("SELECT rowid AS sequence FROM messages WHERE id=?", message.id)!.sequence;
+    const candidates = this.s.all<Outbox>(
+      "SELECT o.* FROM outbox o JOIN handles h ON h.id=o.handle_id WHERE o.status='failed' AND o.channel=? AND h.account_id=? AND json_extract(o.payload,'$.text')=? AND (o.conversation_id=? OR (o.conversation_id IS NULL AND ?='direct' AND EXISTS (SELECT 1 FROM conversation_participants cp WHERE cp.conversation_id=? AND cp.handle_id=o.handle_id)))",
+      message.channel, conversation.account_id, message.text, conversation.id, conversation.kind, conversation.id,
+    ).filter(o => {
+      const age = Date.parse(message.sent_at) - Date.parse(o.decided_at ?? o.created_at);
+      if (o.send_started_sequence !== null && sequence <= o.send_started_sequence) return false;
+      if (age < -1000 || age > 10 * 60_000 || !Number.isFinite(age) || o.payload.attachments?.length) return false;
+      const handle = this.handles.get(o.handle_id);
+      if (o.target_snapshot && (o.target_snapshot.handle !== handle.value_normalized || o.target_snapshot.account_id !== conversation.account_id)) return false;
+      if (message.channel === "email") {
+        const same = (a: string[] = [], b: string[] = []) => JSON.stringify([...new Set(a.map(v => this.registry.normalize("email", v)))].sort()) === JSON.stringify([...new Set(b.map(v => this.registry.normalize("email", v)))].sort());
+        if (!same(o.payload.email_to?.length ? o.payload.email_to : [handle.value_normalized], message.email_to) || !same(o.payload.email_cc, message.email_cc) || !same(o.payload.email_bcc, message.email_bcc)) return false;
+        if (o.payload.subject !== undefined && o.payload.subject !== message.subject) return false;
+      }
+      return true;
+    });
+    if (candidates.length !== 1) return;
+    this.s.run(
+      "UPDATE outbox SET status='sent',sent_message_id=?,conversation_id=?,reconciled_at=? WHERE id=? AND status='failed'",
+      message.id, conversation.id, this.s.now(), candidates[0].id,
+    );
   }
 }

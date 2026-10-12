@@ -17,36 +17,74 @@ export async function syncChannel(
   core: ContactsCore,
   channel: Channel,
 ): Promise<void> {
-  const account = channel.accountId ?? "default";
-  core.ensureSyncState(channel.id, account);
-  const state = core
-    .syncStatus()
-    .find((s) => s.channel === channel.id && s.account_id === account) as
-    { cursor: string | null } | undefined;
-  let cursor = state?.cursor ?? undefined;
+  let account = channel.accountId ?? "default";
   try {
-    for await (const event of channel.sync(cursor, (next) => {
-      // The adapter checkpoints only after the consumer has ingested its page.
-      core.checkpointSync(channel.id, account, next);
-      cursor = next;
-    })) {
-      core.ingest(event);
-      if (channel.id === "email") {
-        cursor = event.external_id;
-        core.checkpointSync(channel.id, account, cursor);
-      }
-    }
-    cursor = channel.getCursor?.() ?? cursor;
-    core.recordSync(channel.id, account, cursor ?? null, null);
+    const resolved = await channel.resolveAccountId?.() ?? account;
+    if (channel.accountId && channel.accountId !== resolved)
+      throw new Error("Resolved sync account differs from configured account");
+    account = resolved;
   } catch (error) {
-    core.recordSync(
-      channel.id,
-      account,
-      null,
-      error instanceof Error ? error.message : String(error),
-    );
+    core.recordSync(channel.id, account, null, error instanceof Error ? error.message : String(error));
     throw error;
   }
+  channel.accountId = account;
+  const owner = core.store.id("sync");
+  if (!core.acquireSyncLease(channel.id, account, owner)) return;
+  const assertLease = () => {
+    if (!core.hasSyncLease(channel.id, account, owner)) throw new Error("Sync lease expired; another process may own this channel/account");
+  };
+  const heartbeat = setInterval(() => {
+    try { core.renewSyncLease(channel.id, account, owner); }
+    catch (error) { console.error(`${channel.id} sync lease: ${String(error)}`); }
+  }, 15_000);
+  heartbeat.unref();
+  try {
+    core.ensureSyncState(channel.id, account);
+    const state = core.syncStatus().find(s => s.channel === channel.id && s.account_id === account);
+    let cursor = state?.cursor ?? undefined;
+    let maintenanceError: unknown;
+    try { await channel.maintenance?.(); }
+    catch (error) { maintenanceError = error; }
+    for await (const event of channel.sync(cursor, (next) => {
+      core.store.db.transaction(() => {
+        assertLease();
+        // The adapter checkpoints only after the consumer has ingested its page.
+        core.checkpointSync(channel.id, account, next);
+      }).immediate();
+      cursor = next;
+    })) {
+      if (event.channel !== channel.id || event.account_id !== account)
+        throw new Error("Sync event channel/account mismatch");
+      core.store.db.transaction(() => {
+        assertLease();
+        core.ingest(event);
+        if (channel.id === "email") {
+          cursor = event.external_id;
+          core.checkpointSync(channel.id, account, cursor);
+        }
+      }).immediate();
+    }
+    if (maintenanceError) throw maintenanceError;
+    cursor = channel.getCursor?.() ?? cursor;
+    core.store.db.transaction(() => {
+      assertLease();
+      core.recordSync(channel.id, account, cursor ?? null, null);
+    }).immediate();
+  } catch (error) {
+    core.store.db.transaction(() => {
+      if (core.hasSyncLease(channel.id, account, owner)) core.recordSync(channel.id, account, null, error instanceof Error ? error.message : String(error));
+    }).immediate();
+    throw error;
+  } finally {
+    clearInterval(heartbeat);
+    core.releaseSyncLease(channel.id, account, owner);
+  }
+}
+/** CLI one-shot syncs attempt every enabled channel, then report all failures. */
+export async function syncChannels(core: ContactsCore, channels: Channel[]): Promise<void> {
+  const results = await Promise.allSettled(channels.map(channel => syncChannel(core, channel)));
+  const failures = results.flatMap((result, i) => result.status === "rejected" ? [`${channels[i].id}: ${String(result.reason)}`] : []);
+  if (failures.length) throw new Error(failures.join("; "));
 }
 function syncIntervals(
   registry: ChannelRegistry,
@@ -80,11 +118,9 @@ export function startSyncLoops(
     const poll = () => {
       if (stopped) return;
       const task = Promise.resolve().then(async () => {
-        await channel.maintenance?.();
         await syncChannel(core, channel);
       })
         .catch((error) => {
-          core.recordSync(channel.id, channel.accountId ?? "default", null, String(error));
           console.error(`${channel.id} sync: ${String(error)}`);
         })
         .finally(() => {
@@ -107,23 +143,26 @@ export function startSyncLoops(
             (event) => {
               if (stopped) return;
               try {
+                if (event.channel !== channel.id || event.account_id !== (channel.accountId ?? "default"))
+                  throw new Error("Live event channel/account mismatch");
                 core.ingest(event);
               } catch (error) {
                 core.recordSync(
                   channel.id,
-                  event.account_id,
+                  channel.accountId ?? "default",
                   null,
                   String(error),
                 );
               }
             },
-            (error) =>
-              core.recordSync(
+            (error) => {
+              if (!stopped) core.recordSync(
                 channel.id,
                 channel.accountId ?? "default",
                 null,
                 error.message,
-              ),
+              );
+            },
           ),
         );
       } catch (error) {
@@ -140,7 +179,9 @@ export function startSyncLoops(
     async close() {
       stopped = true;
       for (const timer of timers) clearTimeout(timer);
-      for (const stop of liveStops) stop();
+      for (const stop of liveStops) {
+        try { stop(); } catch (error) { console.error(`Live listener shutdown: ${String(error)}`); }
+      }
       await Promise.all(pending);
     },
   };

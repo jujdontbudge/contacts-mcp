@@ -208,7 +208,7 @@ export class IMessageChannel implements Channel {
   readonly id = "imessage" as const;
   readonly capabilities = { startConversation: true, groups: true, cc: false };
   private runner: ImsgRunner;
-  private account: string;
+  accountId: string;
   constructor(
     private options: {
       runner?: ImsgRunner;
@@ -220,7 +220,7 @@ export class IMessageChannel implements Channel {
     } = {},
   ) {
     this.runner = options.runner ?? new ProcessImsgRunner();
-    this.account = options.accountId ?? "default";
+    this.accountId = options.accountId ?? "default";
   }
   normalizeHandle(raw: string): string {
     // Opaque/unknown handles are evidence, never a reason to discard a message.
@@ -258,8 +258,8 @@ export class IMessageChannel implements Channel {
       throw new Error(`Invalid imsg attachments for message ${id}`);
     return {
       channel: this.id,
-      account_id: this.account,
-      external_id: string(row.guid) || `rowid:${this.account}:${id}`,
+      account_id: this.accountId,
+      external_id: string(row.guid) || `rowid:${this.accountId}:${id}`,
       conversation_external_id: external,
       kind:
         (row.is_group ?? chat.is_group ?? external.includes(";+;"))
@@ -470,7 +470,7 @@ export class IMessageChannel implements Channel {
     target: SendTarget,
     content: SendContent,
   ): Promise<{ externalId: string; conversationExternalId: string }> {
-    if (target.account_id !== this.account)
+    if (target.account_id !== this.accountId)
       throw new Error("imsg cannot select a different sending account");
     if (
       content.subject ||
@@ -491,10 +491,12 @@ export class IMessageChannel implements Channel {
       );
     if (target.conversationKind === "group" && !target.conversationExternalId)
       throw new Error("Group send requires a chat identifier");
+    const requested = normalizeHandle("imessage", target.handle);
+    const isGroup = (chat: Row) => chat.is_group === true || string(chat.guid).includes(";+;") || string(chat.identifier).includes(";+;");
     const matches = (chat: Row) =>
       target.conversationKind === "group"
         ? [chat.guid, chat.identifier].includes(target.conversationExternalId)
-        : chat.is_group !== true &&
+        : !isGroup(chat) &&
           Array.isArray(chat.participants) &&
           chat.participants.some(
             (h) =>
@@ -506,6 +508,10 @@ export class IMessageChannel implements Channel {
     const beforeChats = (await this.chats()).filter(matches);
     if (target.conversationKind === "group" && beforeChats.length !== 1)
       throw new Error("Group chat identifier must match one existing chat");
+    if (target.conversationKind === "group" && (!isGroup(beforeChats[0]) ||
+        !Array.isArray(beforeChats[0].participants) ||
+        !beforeChats[0].participants.some(h => typeof h === "string" && this.normalizeHandle(h) === requested)))
+      throw new Error("Selected iMessage handle is no longer a verified group participant");
     const seen = new Set<string>();
     for (const chat of beforeChats)
       for (const row of await this.history(chat, {

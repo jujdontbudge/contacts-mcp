@@ -5,7 +5,7 @@ import { ContactsCore } from "../src/core/index.js";
 import { createServer } from "../src/mcp/server.js";
 import { ChannelRegistry } from "../src/channels/registry.js";
 import { FakeChannel } from "../src/channels/fake.js";
-it("exposes all 21 tools and runs identity/draft/send/read calls over SDK in-memory transport", async () => {
+it("exposes all 22 tools and runs identity/draft/send/read calls over SDK in-memory transport", async () => {
   const fake = new FakeChannel("email");
   const core = new ContactsCore({
     path: ":memory:",
@@ -17,7 +17,7 @@ it("exposes all 21 tools and runs identity/draft/send/read calls over SDK in-mem
   try {
     await Promise.all([server.connect(a), client.connect(b)]);
     const list = await client.listTools();
-    expect(list.tools).toHaveLength(21);
+    expect(list.tools).toHaveLength(22);
     expect(list.tools.map((t) => t.name)).toContain("sync_status");
     async function call(name: string, args: Record<string, unknown> = {}) {
       const result = await client.callTool({ name, arguments: args });
@@ -26,6 +26,9 @@ it("exposes all 21 tools and runs identity/draft/send/read calls over SDK in-mem
       return JSON.parse(content[0].text);
     }
     const p = await call("create_person", { display_name: "Alice" });
+    const rule = await call("add_send_rule", { scope: "person", value: p.id, channels: ["email"], created_by: "owner" });
+    expect(await call("remove_send_rule", { rule_id: rule.id, actor: "owner" })).toMatchObject({ active: 0, removed_by: "owner" });
+    expect((await call("list_send_rules"))[0]).toMatchObject({ id: rule.id, active: 0 });
     await call("add_handle", {
       person_id: p.id,
       channel: "email",

@@ -81,11 +81,58 @@ class Socket extends EventEmitter {
     this.emit("close");
   });
 }
+it("sync preserves missing usernames and departed group senders as opaque identities", async () => {
+  const { client, channel } = setup();
+  client.chats.retrieve.mockResolvedValue({ ...group, participants: { ...group.participants, items: [accounts[0].user, { id: "alice" }] } });
+  client.chats.list.mockImplementation(() => iterable([group]));
+  client.messages.list.mockImplementation(() => iterable([messages[2]]));
+  const events = await collect(channel.sync());
+  expect(events[0]).toMatchObject({ sender: "beeper:user:ig:bob", participants: ["beeper:user:ig:alice"], text: "" });
+  await expect(channel.send({ ...target, conversationExternalId: "group", conversationKind: "group" }, { text: "hi" })).rejects.toThrow("participant");
+  expect(client.messages.send).not.toHaveBeenCalled();
+});
+it("reports live parse/socket errors through the Channel error callback without requiring options", async () => {
+  vi.useFakeTimers();
+  const { client } = setup(), socket = new Socket(), errors = vi.fn();
+  const channel = createInstagramChannel({ client, accountID: "ig", socketFactory: () => socket });
+  const stop = channel.live!(vi.fn(), errors);
+  socket.emit("message", "malformed");
+  await vi.advanceTimersByTimeAsync(0);
+  socket.emit("error", new Error("disconnected"));
+  expect(errors).toHaveBeenCalledTimes(2);
+  stop();
+});
+it("refuses a group substituted for a stored direct chat before writes", async () => {
+  const { client, channel } = setup();
+  client.chats.retrieve.mockResolvedValue(group);
+  await expect(channel.send({ ...target, conversationExternalId: "group", conversationKind: "direct" }, { text: "hi" })).rejects.toThrow("kind");
+  expect(client.messages.send).not.toHaveBeenCalled();
+});
+it("does not confirm an older identical message when the pending ID disappears", async () => {
+  const { client } = setup();
+  client.messages.retrieve.mockRejectedValue(new BeeperDesktop.NotFoundError(404, undefined, "not found", new Headers()));
+  const old = { ...messages[1], id: "previous", text: "hi", timestamp: new Date(Date.now() - 30000).toISOString() };
+  client.messages.list.mockImplementation(() => iterable([old]));
+  const channel = createInstagramChannel({ client, accountID: "ig", confirmAttempts: 1 });
+  await expect(channel.send(target, { text: "hi" })).rejects.toThrow("not confirmed");
+  expect(client.messages.send).toHaveBeenCalledTimes(1);
+});
+it("rejects confirmation for a different outgoing text or an incoming message", async () => {
+  const { client, channel } = setup();
+  client.messages.retrieve.mockResolvedValue({ ...messages[1], id: "final", text: "wrong", isSender: false, senderID: "alice" });
+  await expect(channel.send(target, { text: "hi" })).rejects.toThrow("confirmation");
+});
+it("refuses a provider chat whose ID differs from the explicitly requested conversation", async () => {
+  const { client, channel } = setup();
+  client.chats.retrieve.mockResolvedValue({ ...group, id: "another-group" });
+  await expect(channel.send({ ...target, conversationExternalId: "group", conversationKind: "group" }, { text: "hi" })).rejects.toThrow("identity");
+  expect(client.messages.send).not.toHaveBeenCalled();
+});
 afterEach(() => vi.useRealTimers());
 it("resolves exact usernames through contacts before starting a DM and refuses fuzzy matches", async () => {
   const { channel, client } = setup();
     client.chats.list.mockImplementation(() => iterable([group])); // no existing direct chat: exercise the start path
-  await channel.send(target, { text: "hello" });
+  await channel.send(target, { text: "hi" });
   expect(client.accounts.contacts.search).toHaveBeenCalledWith(
     "ig",
     { query: "@alice" },
@@ -295,10 +342,10 @@ describe("Instagram Beeper adapter", () => {
     await expect(channel.send(target, { text: "hi" })).rejects.toThrow(
       "read-only",
     );
-    client.chats.retrieve.mockResolvedValue({
-      ...direct,
+    client.chats.retrieve.mockImplementation(async id => ({
+      ...(id === "group" ? group : direct),
       participants: { ...direct.participants, hasMore: true },
-    });
+    }));
     await expect(collect(channel.sync())).rejects.toThrow("incomplete");
     expect(client.messages.send).not.toHaveBeenCalled();
   });

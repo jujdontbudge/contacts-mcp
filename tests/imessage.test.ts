@@ -102,6 +102,18 @@ const target: SendTarget = {
   channel: "imessage",
   account_id: "default",
 };
+it("refuses a stale or nonmember group recipient before invoking imsg send", async () => {
+  const runner = new Runner(), channel = new IMessageChannel({ runner });
+  await expect(channel.send({ ...target, handle: "+13125550123", conversationKind: "group", conversationExternalId: "iMessage;+;chat123" }, { text: "New text" })).rejects.toThrow("participant");
+  expect(runner.calls.some(args => args[0] === "send")).toBe(false);
+});
+it("cannot treat a group GUID lacking is_group as a direct chat confirmation", async () => {
+  const runner = new Runner();
+  const run = runner.run.bind(runner);
+  runner.run = async args => args[0] === "chats" ? JSON.stringify({ id: 2, guid: "iMessage;+;chat123", identifier: "chat123", participants: [target.handle] }) : run(args);
+  const channel = new IMessageChannel({ runner, confirmationTimeoutMs: 1, confirmationPollMs: 0 });
+  await expect(channel.send(target, { text: "New text" })).rejects.toThrow("uncertain");
+});
 it("maps documented direct/group, email, outgoing, attachments and missing sender into unlinked handles", async () => {
   const channel = new IMessageChannel({ runner: new Runner() });
   const events = (await Array.fromAsync(channel.sync())).sort(

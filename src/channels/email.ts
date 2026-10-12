@@ -82,9 +82,9 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
   const from = opts.from ?? process.env.CONTACTS_EMAIL_FROM;
   if (!from) throw new Error("CONTACTS_EMAIL_FROM missing");
   const sender = address(from);
-  const domain = sender.split("@")[1];
   const replyTo = opts.replyTo ?? process.env.CONTACTS_EMAIL_REPLY_TO;
   if (replyTo) address(replyTo);
+  const ownAddresses = new Set([sender, ...(replyTo ? [address(replyTo)] : [])]);
   const apiKey = opts.apiKey ?? process.env.RESEND_API_KEY;
   const fullApiKey = opts.fullApiKey ?? process.env.RESEND_FULL_API_KEY;
   const accountId = opts.accountId ?? "default";
@@ -178,7 +178,7 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
       email.from,
       ...email.to,
       ...(email.cc ?? []),
-    ]).sort();
+    ]).filter(value => !ownAddresses.has(value)).sort();
     const refs = messageIds(header(email, "References"));
     const parent = messageIds(header(email, "In-Reply-To"))[0];
     const root = refs[0] ?? parent;
@@ -206,11 +206,12 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
       account_id: accountId,
       external_id: email.id,
       conversation_external_id: conversation,
-      kind: participants.length > 2 ? "group" : "direct",
+      kind: participants.length > 1 ? "group" : "direct",
       title: email.subject,
       participants,
+      own_handles: [...ownAddresses],
       sender: address(email.from),
-      direction: address(email.from).split("@")[1] === domain ? "out" : "in",
+      direction: ownAddresses.has(address(email.from)) ? "out" : "in",
       sent_at: new Date(email.created_at).toISOString(),
       text: email.text ?? "",
       subject: email.subject,
@@ -228,6 +229,7 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
   }
   return {
     id: "email",
+    accountId,
     capabilities: { startConversation: true, groups: true, cc: true },
     normalizeHandle: address,
     flushSent,
@@ -289,6 +291,8 @@ export function createEmailChannel(opts: EmailChannelOptions): EmailChannel {
       const to = addresses(
         content.email_to?.length ? content.email_to : [target.handle],
       );
+      if (!to.includes(address(target.handle)))
+        throw new Error("email_to must include the selected handle");
       const cc = addresses(content.email_cc);
       const bcc = addresses(content.email_bcc);
       const parent = content.reply_to_external_id
