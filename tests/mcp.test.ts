@@ -5,7 +5,7 @@ import { ContactsCore } from "../src/core/index.js";
 import { createServer } from "../src/mcp/server.js";
 import { ChannelRegistry } from "../src/channels/registry.js";
 import { FakeChannel } from "../src/channels/fake.js";
-it("exposes all 22 tools and runs identity/draft/send/read calls over SDK in-memory transport", async () => {
+it("exposes all 26 tools and runs identity/draft/send/read calls over SDK in-memory transport", async () => {
   const fake = new FakeChannel("email");
   const core = new ContactsCore({
     path: ":memory:",
@@ -17,7 +17,7 @@ it("exposes all 22 tools and runs identity/draft/send/read calls over SDK in-mem
   try {
     await Promise.all([server.connect(a), client.connect(b)]);
     const list = await client.listTools();
-    expect(list.tools).toHaveLength(22);
+    expect(list.tools).toHaveLength(26);
     expect(list.tools.map((t) => t.name)).toContain("sync_status");
     async function call(name: string, args: Record<string, unknown> = {}) {
       const result = await client.callTool({ name, arguments: args });
@@ -81,6 +81,14 @@ it("exposes all 22 tools and runs identity/draft/send/read calls over SDK in-mem
       arguments: {},
     });
     expect(invalid.isError).toBe(true);
+    expect(await call("list_inbox")).toEqual({ cutoff: null, items: [] });
+    await call("set_inbox_cutoff", { cutoff: "2026-10-12T00:00:00.000Z", actor: "owner" });
+    const inbound = core.ingest({ channel: "email", account_id: "default", external_id: "inbox-mcp", conversation_external_id: "inbox-thread", direction: "in", sender: "alice@example.com", text: "Question", sent_at: "2026-10-12T12:00:00.000Z" });
+    const inbox = await call("list_inbox");
+    expect(inbox.items[0].id).toBe(inbound.id);
+    const claim = await call("claim_inbox", { message_ids: [inbound.id], actor: "agent" });
+    expect(await call("mark_inbox", { message_id: inbound.id, claim_token: claim.claim_token, outcome: "escalated", actor: "agent", note: "Owner decision needed" })).toMatchObject({ outcome: "escalated" });
+    expect((await call("list_inbox")).items).toEqual([]);
   } finally {
     await client.close();
     await server.close();

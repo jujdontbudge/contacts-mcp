@@ -1,3 +1,4 @@
+import { Inbox } from "./inbox.js";
 import { openDatabase } from "./db.js";
 import { Store } from "./store.js";
 import { Identity } from "./identity.js";
@@ -17,6 +18,7 @@ export class ContactsCore {
   readonly authorization: Authorization;
   private readonly registry: ChannelRegistry;
   readonly outbox: OutboxService;
+  readonly inbox: Inbox;
   constructor(
     options: {
       path?: string;
@@ -51,6 +53,7 @@ export class ContactsCore {
       if (limit !== undefined && (!Number.isInteger(limit) || limit < 0))
         throw new Error(`Invalid rate limit for ${c}`);
     }
+    this.inbox = new Inbox(this.store);
     this.outbox = new OutboxService(
       this.store,
       this.identity,
@@ -60,6 +63,7 @@ export class ContactsCore {
       registry,
       rates,
       options.dispatchHooks,
+      this.inbox,
     );
   }
   ingest(event: IngestEvent) {

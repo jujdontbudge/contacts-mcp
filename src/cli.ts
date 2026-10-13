@@ -80,7 +80,9 @@ async function main(): Promise<void> {
   }
   try {
     let result: unknown;
-    if (command === "repair-email-threads") {
+    if (command === "inbox" && action === "cutoff" && args[0] && args[1])
+      result = core.inbox.setCutoff(args[0] === "now" ? new Date().toISOString() : args[0], args[1]);
+    else if (command === "repair-email-threads") {
       const email = registry.list().find((c) => c.id === "email") as
         EmailChannel | undefined;
       if (email) await email.refreshSent();
@@ -115,7 +117,7 @@ async function main(): Promise<void> {
       result = core.outbox.reject(args[0], args[1], args.slice(2).join(" "));
     else
       throw new Error(
-        "Usage: contacts-mcp stdio | serve | sync [channel] | repair-email-threads | person list|show <id>|create <name> | drafts list|approve <id> <authorizer> <reason>|reject <id> <actor> <reason>",
+        "Usage: contacts-mcp stdio | serve | sync [channel] | inbox cutoff <ISO|now> <actor> | repair-email-threads | person list|show <id>|create <name> | drafts list|approve <id> <authorizer> <reason>|reject <id> <actor> <reason>",
       );
     console.log(JSON.stringify(result, null, 2));
   } finally {

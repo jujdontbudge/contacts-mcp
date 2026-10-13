@@ -4,6 +4,7 @@ import type {
   SendContent,
   SendTarget,
 } from "../channels/channel.js";
+import { Inbox } from "./inbox.js";
 import { Store } from "./store.js";
 import { Identity } from "./identity.js";
 import { Handles } from "./handles.js";
@@ -28,6 +29,7 @@ export class OutboxService {
     private registry: ChannelRegistry,
     private rates: Partial<Record<ChannelId, number>>,
     private hooks: DispatchHooks = {},
+    private inbox: Inbox = new Inbox(s),
   ) {}
   private resolve(
     input: Pick<
@@ -207,6 +209,10 @@ export class OutboxService {
     }
   }
   async send(input: SendRequest) {
+    if (input.idempotency_key !== undefined && !input.idempotency_key.trim()) throw new Error("Idempotency key must be nonempty");
+    if (input.inbox_message_id && !input.idempotency_key) throw new Error("Inbox replies require an idempotency key");
+    const reused = this.s.db.transaction(() => this.existing(input)).immediate();
+    if (reused) return reused;
     const target = this.resolve(input);
     const {
       text,
@@ -255,23 +261,43 @@ export class OutboxService {
       input.authorized_by ? input.reason! :
       (rule ? `Standing rule ${rule.id} (${rule.scope}:${rule.value})${input.reason ? `; ${input.reason}` : ""}` : input.reason ?? null);
     const id = this.s.id("o");
-    this.s.run(
-      "INSERT INTO outbox (id,status,person_id,conversation_id,handle_id,channel,payload,authorized_by,reason,created_by,created_at,target_snapshot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-      id,
-      "draft",
-      target.person_id,
-      target.conversation_id ?? null,
-      target.handle_id,
-      target.channel,
-      JSON.stringify(content),
-      authorized_by,
-      reason,
-      input.created_by,
-      this.s.now(),
-      JSON.stringify(target),
-    );
-    if (authorized_by) return this.dispatch(id, authorized_by, reason!, input.authorized_by ? undefined : rule?.id);
+    const duplicate = this.s.db.transaction(() => {
+      const existing = this.existing(input);
+      if (existing) return existing;
+      if (input.inbox_message_id) {
+        if (!target.conversation_id) throw new Error("Inbox replies require conversation_id");
+        this.inbox.assertClaim(input.inbox_message_id, input.claim_token, target.conversation_id);
+      }
+      this.s.run(
+        "INSERT INTO outbox (id,status,person_id,conversation_id,handle_id,channel,payload,authorized_by,reason,created_by,created_at,target_snapshot,idempotency_key,inbox_message_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        id,
+        "draft",
+        target.person_id,
+        target.conversation_id ?? null,
+        target.handle_id,
+        target.channel,
+        JSON.stringify(content),
+        authorized_by,
+        reason,
+        input.created_by,
+        this.s.now(),
+        JSON.stringify(target),
+        input.idempotency_key ?? null,
+        input.inbox_message_id ?? null,
+      );
+      return undefined;
+    }).immediate();
+    if (duplicate) return duplicate;
+    if (authorized_by) return this.dispatch(id, authorized_by, reason!, input.authorized_by ? undefined : rule?.id, input.claim_token);
     return this.result(this.get(id), target);
+  }
+  private existing(input: SendRequest) {
+    const o = (input.idempotency_key ? this.s.one<Outbox>("SELECT * FROM outbox WHERE idempotency_key=?", input.idempotency_key) : undefined)
+      ?? (input.inbox_message_id ? this.s.one<Outbox>("SELECT * FROM outbox WHERE inbox_message_id=?", input.inbox_message_id) : undefined);
+    if (!o) return undefined;
+    // Return the original record even if routing, permissions or content have changed.
+    const target = o.target_snapshot ?? this.resolve({ person_id: o.person_id, handle_id: o.handle_id, channel: o.channel, conversation_id: o.conversation_id ?? undefined }, false);
+    return { ...this.result(o, target), already_used: true };
   }
   get(id: string): Outbox {
     const o = this.s.one<Outbox>("SELECT * FROM outbox WHERE id=?", id);
@@ -321,13 +347,14 @@ export class OutboxService {
     }
     return {
       ...o,
+      already_used: false,
       person: this.identity.get(target.person_id),
       handle: this.handles.get(target.handle_id),
       channel: target.channel,
       target,
     };
   }
-  private async dispatch(id: string, actor: string, reason: string, ruleId?: string) {
+  private async dispatch(id: string, actor: string, reason: string, ruleId?: string, claimToken?: string) {
     const o = this.get(id);
     if (o.status !== "draft")
       throw new Error("Only draft messages can be approved/sent");
@@ -351,6 +378,8 @@ export class OutboxService {
         this.s.run("UPDATE outbox SET authorized_by=NULL,reason=NULL WHERE id=?", id);
         return false;
       }
+      if (o.inbox_message_id && claimToken) this.inbox.assertClaim(o.inbox_message_id, claimToken, target.conversation_id);
+      if (o.inbox_message_id && !claimToken && this.s.one("SELECT 1 FROM messages i JOIN messages m ON m.conversation_id=i.conversation_id WHERE i.id=? AND m.direction='out' AND julianday(m.sent_at)>julianday(i.sent_at)", o.inbox_message_id)) throw new Error("Inbound already answered elsewhere");
       this.checks(target, o.payload);
       this.s.run(
         "UPDATE outbox SET status='approved',authorized_by=?,reason=?,decided_at=? WHERE id=?",
@@ -460,7 +489,7 @@ export class OutboxService {
     const conversation = this.conversations.get(message.conversation_id);
     const sequence = this.s.one<{ sequence: number }>("SELECT rowid AS sequence FROM messages WHERE id=?", message.id)!.sequence;
     const candidates = this.s.all<Outbox>(
-      "SELECT o.* FROM outbox o JOIN handles h ON h.id=o.handle_id WHERE o.status='failed' AND o.channel=? AND h.account_id=? AND json_extract(o.payload,'$.text')=? AND (o.conversation_id=? OR (o.conversation_id IS NULL AND ?='direct' AND EXISTS (SELECT 1 FROM conversation_participants cp WHERE cp.conversation_id=? AND cp.handle_id=o.handle_id)))",
+      "SELECT o.* FROM outbox o JOIN handles h ON h.id=o.handle_id WHERE (o.status='failed' OR (o.status='sending' AND o.idempotency_key IS NOT NULL)) AND o.channel=? AND h.account_id=? AND json_extract(o.payload,'$.text')=? AND (o.conversation_id=? OR (o.conversation_id IS NULL AND ?='direct' AND EXISTS (SELECT 1 FROM conversation_participants cp WHERE cp.conversation_id=? AND cp.handle_id=o.handle_id)))",
       message.channel, conversation.account_id, message.text, conversation.id, conversation.kind, conversation.id,
     ).filter(o => {
       const age = Date.parse(message.sent_at) - Date.parse(o.decided_at ?? o.created_at);
@@ -477,7 +506,7 @@ export class OutboxService {
     });
     if (candidates.length !== 1) return;
     this.s.run(
-      "UPDATE outbox SET status='sent',sent_message_id=?,conversation_id=?,reconciled_at=? WHERE id=? AND status='failed'",
+      "UPDATE outbox SET status='sent',sent_message_id=?,conversation_id=?,reconciled_at=? WHERE id=? AND status IN ('failed','sending')",
       message.id, conversation.id, this.s.now(), candidates[0].id,
     );
   }

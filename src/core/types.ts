@@ -54,8 +54,13 @@ export interface Outbox {
   reconciled_at: string | null;
   target_snapshot: SendTarget | null;
   send_started_sequence: number | null;
+  idempotency_key: string | null;
+  inbox_message_id: string | null;
 }
 export interface SendRequest extends SendContent {
+  idempotency_key?: string;
+  inbox_message_id?: string;
+  claim_token?: string;
   person_id?: string;
   conversation_id?: string;
   handle_id?: string;

@@ -28,4 +28,13 @@ ALTER TABLE outbox ADD COLUMN send_started_sequence INTEGER;
 CREATE INDEX outbox_reconcile ON outbox(channel,status,conversation_id);
 CREATE INDEX messages_conversation_time ON messages(conversation_id,sent_at);
 CREATE TABLE sync_leases(channel TEXT NOT NULL, account_id TEXT NOT NULL, owner TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(channel,account_id));`,
+  `CREATE TABLE inbox_config(id INTEGER PRIMARY KEY CHECK(id=1), cutoff TEXT NOT NULL, actor TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE inbox_handling(message_id TEXT PRIMARY KEY REFERENCES messages(id), outcome TEXT NOT NULL CHECK(outcome IN ('new','claimed','auto_replied','escalated','ignored','done')), actor TEXT NOT NULL, note TEXT NOT NULL, rule TEXT, outbox_id TEXT REFERENCES outbox(id), claim_token TEXT, claim_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE inbox_events(id TEXT PRIMARY KEY, message_id TEXT REFERENCES messages(id), outcome TEXT NOT NULL, actor TEXT NOT NULL, note TEXT NOT NULL, rule TEXT, outbox_id TEXT REFERENCES outbox(id), claim_token TEXT, claim_expires_at TEXT, at TEXT NOT NULL);
+ALTER TABLE outbox ADD COLUMN idempotency_key TEXT;
+ALTER TABLE outbox ADD COLUMN inbox_message_id TEXT REFERENCES messages(id);
+CREATE UNIQUE INDEX outbox_idempotency ON outbox(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX outbox_inbox_reply ON outbox(inbox_message_id) WHERE inbox_message_id IS NOT NULL;
+CREATE INDEX inbox_state ON inbox_handling(outcome,claim_expires_at);
+CREATE INDEX messages_inbox ON messages(direction,sent_at);`,
 ];

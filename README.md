@@ -51,6 +51,7 @@ Run these commands through the installed bin, or `node dist/cli.js …` from thi
 - Identity: `find_person`, `get_person`, `create_person`, `update_person`.
 - Handles: `add_handle`, `change_handle`, `unlink_handle`, `link_handle`, `list_unlinked`, `list_link_suggestions`.
 - History: `get_timeline`, `list_conversations`, `get_conversation`, `search_messages`.
+- Inbox: `list_inbox`, `claim_inbox`, `mark_inbox`, `set_inbox_cutoff`.
 - Outbox: `send_message`, `list_drafts`, `approve_draft`, `reject_draft`.
 - Permissions/status: `add_send_rule`, `remove_send_rule`, `list_send_rules`, `sync_status`.
 
@@ -95,7 +96,7 @@ node dist/cli.js sync imessage  # one backfill/reconcile, then exit
 node dist/cli.js serve          # sync + watch + MCP at http://127.0.0.1:8787/mcp
 ```
 
-HTTP clients must send `Authorization: Bearer <CONTACTS_HTTP_TOKEN>` on every request. The endpoint uses the SDK's stateless Streamable HTTP transport and the same 22 tools as stdio. Keep loopback binding for local use; use Tailscale Serve to expose it on the tailnet, or explicitly bind `CONTACTS_HTTP_HOST` to the machine's tailnet address. Do not expose it on a public interface.
+HTTP clients must send `Authorization: Bearer <CONTACTS_HTTP_TOKEN>` on every request. The endpoint uses the SDK's stateless Streamable HTTP transport and the same 26 tools as stdio. Keep loopback binding for local use; use Tailscale Serve to expose it on the tailnet, or explicitly bind `CONTACTS_HTTP_HOST` to the machine's tailnet address. Do not expose it on a public interface.
 
 Additional environment variables:
 
@@ -145,3 +146,67 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.contacts-mcp.daemon.pl
 No live Messages reads/sends are part of the offline tests. After permissions are granted, validate initial/repeated backfill, group participants/identifiers, a watch reconnect with poll reconciliation, and an explicitly authorized message to the owner (including confirmation and no duplicate stored copy).
 
 Message-reading tools omit full `raw` platform payloads by default; pass `include_raw: true` to inspect them. `send_message` also accepts this flag to return its stored sent message. Raw payloads remain in the database.
+
+## Inbox automation
+
+Activate deliberately with `node dist/cli.js inbox cutoff now owner`, or
+`set_inbox_cutoff({cutoff: "<ISO timestamp>", actor: "owner"})`. The cutoff is stored
+in SQLite and audited. Until set, inbox processing is disabled. Only provider
+message timestamps strictly after the cutoff qualify, so old history imported
+later remains excluded. Moving the cutoff does not reset handled messages.
+
+- `list_inbox({channels?, limit?})` returns `{cutoff, items}` oldest first. Defaults
+  to email, Instagram and TikTok; **iMessage is personal and requires explicit
+  inclusion**. Each item includes the inbound, person `{id,name,tags}` (or null
+  for unlinked senders), handle, conversation ID, latest five thread messages
+  and handling state. Raw payloads are omitted. Limit defaults to 100 (max 1000).
+- `claim_inbox({message_ids, actor, lease_seconds?})` claims the entire set
+  atomically or fails without claiming any. Default lease: 600 seconds (1–3600).
+  Returns `claim_token`, `claim_expires_at` and state items. Each acquisition has
+  a fresh token, even for the same actor. Expired claims become listable again;
+  stale tokens cannot send or finalize work.
+- `mark_inbox({message_id, claim_token, outcome, actor, note, rule?, outbox_id?})`
+  finalizes as `auto_replied`, `escalated`, `ignored` or `done`. Identical calls
+  are idempotent; conflicting final decisions fail. Every state change is
+  audited with actor, reason, rule, linked outbox, token, lease and timestamp.
+  `auto_replied` requires a confirmed sent outbox bound to the inbound.
+- `set_inbox_cutoff({cutoff, actor})` sets an ISO timestamp and returns config.
+
+A scheduled agent uses **list → claim → send (when authorized) → mark**. Claim
+only the IDs it can finish within the lease. For a reply call `send_message`
+with the listed `conversation_id`, `inbox_message_id`, `claim_token` and an
+`idempotency_key`, in addition to the existing target/content/authorization.
+Use `rule:<rule-id>:msg:<message-id>` for per-message rules or
+`rule:<rule-id>:person:<person-id>` for once-per-person rules. The key is global
+and permanent. Reuse returns the original outbox and `already_used: true`, even
+if the new payload differs; a new record returns false. The inbound binding
+also returns the original send if a different rule/key tries that same message.
+A once-per-person duplicate may refer to another inbound: mark the current
+message `ignored` with that explanation rather than pretending a new reply was
+sent. Unlinked senders can be escalated without creating a guessed identity.
+
+The guarantee is **at most one provider dispatch per key or bound inbound**,
+across processes and crashes. A draft, failed or `sending` result is not a
+confirmed reply. Never generate a new key to retry it. A crash between storing
+an outbox and dispatch leaves a draft; a crash around the external mutation
+leaves `sending`. Repeated `send_message` returns that record without resuming
+it. Existing conservative sync reconciliation can settle keyed uncertain
+`sending` and failed records from outgoing evidence. Unsettled records require
+owner investigation; safety deliberately takes precedence over delivery.
+Authorization and owner-approved draft handling still apply. Claims coordinate
+work; binding and keys prevent side effects from repeating after lease expiry.
+
+A confirmed outgoing message in the same conversation with a provider timestamp
+strictly later than an inbound closes all earlier `new`/`claimed` messages.
+This applies to manual/native replies and server sends, including replies
+synced before an older inbound arrives. Drafts, pending and failed provider
+copies do not count. The next inbox operation persists `done` for replies
+elsewhere, or `auto_replied` for a confirmed bound send; final decisions retain
+their audit. In groups this deliberately treats any outgoing reply as answering
+earlier pending messages in the conversation.
+
+Creator-system connection: extend the existing marketing-repo contacts adapter
+to read `inbox_handling`/`inbox_events` through a future narrow escalation-read
+interface and render `escalated` notes in the dashboard's generic approval inbox.
+The scheduled T3 agent owns triage; contacts-mcp owns leases and send safety.
+No dashboard, rule engine, recurring task or parallel CRM is added here.

@@ -245,7 +245,7 @@ export function tools(core: ContactsCore) {
     },
     send_message: {
       description:
-        "First find_person, inspect candidates, pick a person_id (or verified linked handle_id), then send_message. Draft by default; sends immediately only with owner authorization via authorized_by plus reason or a standing rule. Person-only sends select a direct chat; groups REQUIRE explicit conversation_id. Specify channel/handle to control routing. Email To must include that handle; CC/BCC are explicit, never inherited. Echoes recipient/channel/status. Failed or uncertain sends are reconciled from sync evidence, never automatically retried; inspect history before creating another send.",
+        "First find_person, inspect candidates, pick a person_id (or verified linked handle_id), then send_message. Draft by default; sends immediately only with owner authorization via authorized_by plus reason or a standing rule. Person-only sends select a direct chat; groups REQUIRE explicit conversation_id. Specify channel/handle to control routing. Email To must include that handle; CC/BCC are explicit, never inherited. Optional idempotency_key permanently deduplicates calls and returns already_used. For inbox automation supply inbox_message_id, conversation_id and claim_token to fence stale leases and bind one send to the inbound. Echoes recipient/channel/status. Failed or uncertain sends are reconciled from sync evidence, never automatically retried; inspect history before creating another send.",
       schema: z
         .object({
           ...content,
@@ -257,6 +257,9 @@ export function tools(core: ContactsCore) {
           authorized_by: actor.optional(),
           reason: reason.optional(),
           created_by: actor,
+          idempotency_key: id.optional(),
+          inbox_message_id: id.optional(),
+          claim_token: id.optional(),
         })
         .refine(
           (a) => a.person_id || a.conversation_id || a.handle_id,
@@ -279,6 +282,26 @@ export function tools(core: ContactsCore) {
           message: core.conversations.message(result.sent_message_id),
         };
       },
+    },
+    list_inbox: {
+      description: "List unhandled inbound messages after the configured cutoff, oldest first. Includes expired claims. Defaults to business channels; iMessage must be explicit. Disabled until cutoff is set.",
+      schema: z.object({ channels: z.array(channel).min(1).optional(), limit }),
+      call: (args: Parameters<typeof core.inbox.list>[0]) => core.inbox.list(args),
+    },
+    claim_inbox: {
+      description: "Atomically claim all supplied inbound IDs or fail without claiming any. Returns a unique fencing token; lease defaults to 600 seconds. Use token for send and mark.",
+      schema: z.object({ message_ids: z.array(id).min(1).max(1000), actor, lease_seconds: z.number().int().min(1).max(3600).optional() }),
+      call: (args: Parameters<typeof core.inbox.claim>[0]) => core.inbox.claim(args),
+    },
+    mark_inbox: {
+      description: "Finalize a claimed inbound with outcome/reason and optional rule/outbox. Exact repeats are idempotent. auto_replied requires a confirmed bound send.",
+      schema: z.object({ message_id: id, outcome: z.enum(["auto_replied", "escalated", "ignored", "done"]), actor, note: reason, claim_token: id, rule: id.optional(), outbox_id: id.optional() }),
+      call: (args: Parameters<typeof core.inbox.mark>[0]) => core.inbox.mark(args),
+    },
+    set_inbox_cutoff: {
+      description: "Activate inbox processing strictly after this ISO timestamp. Changing the cutoff is audited; does not reset handled messages.",
+      schema: z.object({ cutoff: z.iso.datetime({ offset: true }), actor }),
+      call: (args: { cutoff: string; actor: string }) => core.inbox.setCutoff(args.cutoff, args.actor),
     },
     list_drafts: {
       description: "List pending draft messages for the approval inbox.",

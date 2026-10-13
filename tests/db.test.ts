@@ -49,6 +49,7 @@ it("persists data in WAL mode, runs migrations once, and enforces uniqueness", (
       { version: 3 },
       { version: 4 },
       { version: 5 },
+      { version: 6 },
     ]);
     expect(core.store.all("SELECT * FROM handle_events")).toHaveLength(1);
   } finally {

@@ -88,7 +88,7 @@ Embeddings ("the girl from the gym video") can be added later behind the same to
 The result always echoes the resolved person, handle and channel, so the agent can double-check.
 
 ## 8. MCP tools
-`find_person`, `get_person`, `create_person`, `update_person`, `add_handle`, `change_handle`, `unlink_handle`, `link_handle`, `list_unlinked`, `list_link_suggestions`, `get_timeline`, `list_conversations`, `get_conversation`, `search_messages`, `send_message`, `list_drafts`, `approve_draft`, `reject_draft`, `add_send_rule`, `remove_send_rule`, `list_send_rules`, `sync_status`.
+`find_person`, `get_person`, `create_person`, `update_person`, `add_handle`, `change_handle`, `unlink_handle`, `link_handle`, `list_unlinked`, `list_link_suggestions`, `get_timeline`, `list_conversations`, `get_conversation`, `search_messages`, `send_message`, `list_drafts`, `approve_draft`, `reject_draft`, `add_send_rule`, `remove_send_rule`, `list_send_rules`, `sync_status`, `list_inbox`, `claim_inbox`, `mark_inbox`, `set_inbox_cutoff`.
 
 ## 9. Build phases
 1. **Core and MCP:** repo, database and migrations, identity, handles with an edit log, resolver, outbox, all tools, and a fake channel. Offline tests.
@@ -102,3 +102,64 @@ The result always echoes the resolved person, handle and channel, so the agent c
 
 ## 10. Tests
 Vitest. Offline: core and tools against a fake channel, covering resolution, ambiguity, drafts vs authorized sends, deduplication, the handle edit log and the reply window. Live tests are gated behind `LIVE=1` and the channel name, and only ever message the owner.
+
+## 11. Inbox handling and at-most-once replies
+
+Core owns `Inbox` behind list/claim/mark/config methods; MCP and CLI remain thin.
+Migration 6 adds `inbox_config` (cutoff, actor, update time), `inbox_handling`
+(one row per handled inbound) and append-only `inbox_events`. Handling rows
+contain outcome, actor, note, optional rule/outbox ID, claim token/expiry and
+creation/update times. Outcomes are `new`, `claimed`, `auto_replied`, `escalated`,
+`ignored`, `done`. Missing rows represent `new`; eligible list results persist
+that initial state lazily, without allocating handling rows for historical
+backfill. State changes and cutoff changes are audited.
+
+`list_inbox({channels?,limit?})` returns `{cutoff,items}` with inbound metadata,
+linked person `{id,name,tags}` or null, handle, conversation ID, latest five
+thread messages and state. No raw payloads. Default channels: email, instagram,
+tiktok. iMessage requires explicit inclusion. Default limit 100, maximum 1000.
+Only inbound provider timestamps strictly after the persisted cutoff qualify.
+No cutoff means disabled, never an implicit historical inbox.
+
+`claim_inbox({message_ids,actor,lease_seconds?})` returns
+`{claim_token,claim_expires_at,items}`. All-or-nothing immediate SQLite
+transactions coordinate processes. Default lease 600 seconds, bounded 1–3600.
+Expired claims are listable; reacquisition creates a fresh fencing token.
+`mark_inbox({message_id,claim_token,outcome,actor,note,rule?,outbox_id?})`
+requires ownership and a final outcome. Exact repetitions do not add audit
+entries; conflicting final decisions fail. `auto_replied` needs a confirmed
+bound send. A worker can finish recording its own confirmed bound reply after
+reply reconciliation; its token must still match that send's original claim.
+`set_inbox_cutoff({cutoff,actor})` and CLI `inbox cutoff <ISO|now> <actor>` audit
+activation. Cutoff changes never reopen finalized messages.
+
+`send_message` adds optional `idempotency_key`, `inbox_message_id`, `claim_token`.
+Unique indexes enforce one outbox per non-null key and bound inbound. Creation,
+claim checking and dispatch reservation use immediate transactions; dispatch
+rechecks the token before the external await. Every retry returns the original
+record with `already_used: true`; no retry path dispatches it again. An initial
+result has false. Keys are permanent and global, not scoped to an actor/channel.
+Automation must bind its inbound and supply its claim token/conversation, using
+`rule:<rule-id>:msg:<message-id>` or `rule:<rule-id>:person:<person-id>`.
+Duplicate once-per-person results can belong to a different message and should
+lead to an `ignored` decision for the current inbound.
+
+At most one provider dispatch is guaranteed per key/bound inbound, including
+crashes before/after external writes and overlapping workers. This is not an
+exactly-once delivery claim. Interrupted drafts/sending records are returned
+without automatically resuming; only explicit owner draft approval can dispatch
+a retained draft. Conservative existing outgoing reconciliation also admits
+keyed `sending` crash records, with the same identity/time/sequence/content
+checks as failed sends. Uncertain entries never retry external mutations.
+
+A confirmed outgoing message strictly later in the same conversation closes
+earlier pending inbound, including manually sent/synced replies and late
+inbound ingestion. Provider pending/failed copies are excluded. Inbox operations
+persist `done` (reply elsewhere) or `auto_replied` (confirmed bound reply),
+retaining final decisions and audit. This rule intentionally covers all pending
+inbound in a group thread. See README's Inbox automation workflow.
+
+Offline tests cover overlapping connections, rollback of claim sets, exact
+expiry, stale fencing, cutoff/history, personal-channel exclusion, manual
+replies, permanent once-per-person keys, concurrent send calls, crash before
+dispatch and after mutation, sync recovery, binding and idempotent finalization.
