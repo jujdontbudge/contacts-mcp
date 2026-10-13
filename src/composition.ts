@@ -77,6 +77,15 @@ export async function createContactsSystem(
             )
           : undefined,
     },
+    sideshift: {
+      ...options.adapters?.sideshift,
+      clock: options.adapters?.sideshift?.clock ?? options.clock,
+      getOutboxId: () => {
+        const id = dispatch.getStore();
+        if (!id || core.outbox.get(id).status !== "sending") throw new Error("No active SideShift dispatch");
+        return id;
+      },
+    },
     email: {
       ...options.adapters?.email,
       clock: options.adapters?.email?.clock ?? options.clock,

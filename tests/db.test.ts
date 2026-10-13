@@ -30,7 +30,7 @@ it("persists data in WAL mode, runs migrations once, and enforces uniqueness", (
     ).toBe(handle.id);
     expect(() =>
       core!.store.run(
-        "INSERT INTO handles VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO handles(id,channel,value_normalized,value_raw,person_id,account_id,created_at) VALUES (?,?,?,?,?,?,?)",
         "duplicate",
         "email",
         "a@example.com",
@@ -50,6 +50,7 @@ it("persists data in WAL mode, runs migrations once, and enforces uniqueness", (
       { version: 4 },
       { version: 5 },
       { version: 6 },
+      { version: 7 },
     ]);
     expect(core.store.all("SELECT * FROM handle_events")).toHaveLength(1);
   } finally {

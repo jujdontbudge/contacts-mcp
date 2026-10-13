@@ -178,9 +178,10 @@ it("composes four real adapters on fixtures: cursors, one person timeline, four 
       ),
     ).toEqual(new Set(["imessage", "instagram", "email", "tiktok"]));
     const statuses = core.syncStatus();
-    expect(statuses).toHaveLength(4);
+    expect(statuses).toHaveLength(5);
+    expect(statuses.find(s => s.channel === "sideshift")?.status).toBe("disabled");
     expect(
-      statuses.every((s) => s.cursor && s.last_ok_at && !s.last_error),
+      statuses.filter(s => s.status === "enabled").every((s) => s.cursor && s.last_ok_at && !s.last_error),
     ).toBe(true);
     expect(statuses.find((s) => s.channel === "instagram")?.account_id).toBe(
       "ig",
@@ -227,6 +228,7 @@ it("composes four real adapters on fixtures: cursors, one person timeline, four 
       instagram: 300_000,
       email: 120_000,
       tiktok: 120_000,
+      sideshift: 120_000,
     });
   } finally {
     core.close();
@@ -240,7 +242,7 @@ it("reports requested channels missing credentials as disabled without making re
   });
   try {
     expect(registry.list()).toEqual([]);
-    expect(tools(core).sync_status.call()).toHaveLength(4);
+    expect(tools(core).sync_status.call()).toHaveLength(5);
     expect(core.syncStatus().every((s) => s.status === "disabled")).toBe(true);
     expect(
       core.syncStatus().find((s) => s.channel === "email")?.disabled_reason,

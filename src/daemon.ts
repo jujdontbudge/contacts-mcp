@@ -11,6 +11,7 @@ export const DEFAULT_SYNC_INTERVALS: Record<ChannelId, number> = {
   instagram: 300_000,
   email: 120_000,
   tiktok: 120_000,
+  sideshift: 120_000,
 };
 
 export async function syncChannel(
@@ -45,6 +46,10 @@ export async function syncChannel(
     let maintenanceError: unknown;
     try { await channel.maintenance?.(); }
     catch (error) { maintenanceError = error; }
+    if (channel.syncProfiles) for await (const profile of channel.syncProfiles(cursor)) {
+      if (profile.channel !== channel.id || profile.account_id !== account) throw new Error("Sync profile channel/account mismatch");
+      core.store.db.transaction(() => { assertLease(); core.handles.ingestProfile(profile); }).immediate();
+    }
     for await (const event of channel.sync(cursor, (next) => {
       core.store.db.transaction(() => {
         assertLease();

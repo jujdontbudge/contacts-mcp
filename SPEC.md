@@ -42,7 +42,7 @@ agents ──MCP (stdio | HTTP)──► tools ──► core ──► SQLite (
 ## 4. Data model (SQLite)
 - `persons(id TEXT PK 'p_<ulid>', display_name, aliases JSON, tags JSON, notes, created_at, updated_at)`
 - `person_links(person_id, system, external_id, UNIQUE(system, external_id))`, e.g. `creator-crm` / `7`.
-- `handles(id PK, channel, value_normalized, value_raw, person_id NULL, account_id, created_at, UNIQUE(channel, account_id, value_normalized))`. Channels: `imessage | instagram | email | tiktok`. Phone numbers are normalized to E.164 and emails to lower case.
+- `handles(id PK, channel, value_normalized, value_raw, person_id NULL, account_id, created_at, profile JSON NULL, UNIQUE(channel, account_id, value_normalized))`. Channels: `imessage | instagram | email | tiktok | sideshift`. Phone numbers are normalized to E.164 and emails to lower case.
 - `handle_events(id, handle_id, person_id_before, person_id_after, action add|link|unlink|change, actor, reason, at)`: the edit log.
 - `link_suggestions(handle_id, person_id, evidence, score, status)`.
 - `conversations(id 'c_<ulid>', channel, account_id, external_id, kind direct|group, title, UNIQUE(channel, account_id, external_id))`.
@@ -56,7 +56,7 @@ agents ──MCP (stdio | HTTP)──► tools ──► core ──► SQLite (
 ## 5. Channel interface
 ```ts
 interface Channel {
-  id: 'imessage' | 'instagram' | 'email' | 'tiktok';
+  id: 'imessage' | 'instagram' | 'email' | 'tiktok' | 'sideshift';
   capabilities: { startConversation: boolean; groups: boolean; cc: boolean; replyWindowHours?: number };
   sync(cursor?: string): AsyncIterable<IngestEvent>;           // history + new messages, resumable
   live?(onEvent: (e: IngestEvent) => void): () => void;        // optional push (Beeper WS)
@@ -117,7 +117,7 @@ backfill. State changes and cutoff changes are audited.
 `list_inbox({channels?,limit?})` returns `{cutoff,items}` with inbound metadata,
 linked person `{id,name,tags}` or null, handle, conversation ID, latest five
 thread messages and state. No raw payloads. Default channels: email, instagram,
-tiktok. iMessage requires explicit inclusion. Default limit 100, maximum 1000.
+tiktok, sideshift. iMessage requires explicit inclusion. Default limit 100, maximum 1000.
 Only inbound provider timestamps strictly after the persisted cutoff qualify.
 No cutoff means disabled, never an implicit historical inbox.
 
@@ -163,3 +163,39 @@ Offline tests cover overlapping connections, rollback of claim sets, exact
 expiry, stale fencing, cutoff/history, personal-channel exclusion, manual
 replies, permanent once-per-person keys, concurrent send calls, crash before
 dispatch and after mutation, sync recovery, binding and idempotent finalization.
+
+## 12. SideShift
+
+SideShift is a Platform REST channel behind the existing `Channel` interface.
+Registration uses `CONTACTS_CHANNELS=sideshift` and `SIDESHIFT_API_KEY`; no new
+account setup or messaging webhook is needed. The poll delay is two minutes,
+configurable by `CONTACTS_SYNC_INTERVAL_SIDESHIFT_MS`. Both support channels and
+DM conversations enter the same core history and default business inbox.
+The 15-minute inbox worker needs no change to its list/claim/send/mark sequence.
+
+Migration 7 adds nullable JSON `handles.profile`. Optional `Channel.syncProfiles`
+returns identity observations under the same sync lease, before message sync;
+it creates no synthetic conversation or inbound for an applicant without chat.
+`IngestEvent.handle_profiles` carries observations from conversation peers.
+Core owns profile persistence and linking: an exact SideShift `person_links`
+user ID can link an unlinked handle with audit; conflicting links fail instead
+of reassigning. Names and public Instagram/TikTok handles are suggestions only.
+No new person IDs are invented during sync.
+
+SideShift handles preserve case-sensitive creator user IDs, display names,
+exposed profile/image URLs, social handles and all observed applicant job IDs.
+Company/member identities remain outgoing senders, never recipients. Where the
+API cannot resolve a provider customer to a SideShift user, a scoped provider
+handle stays unlinked. Missing direction proof fails sync instead of guessing.
+
+Reply routing is explicit (`support:<remote ID>` or `dm:<remote ID>`).
+New applicant messages use `/applicants/message`, with the selected SideShift
+user ID and approved `metadata.sideshift_job_id`. `includeJobLink: false`
+keeps the single approved text as the only message. Core's authorization,
+drafts, standing rules, permanent idempotency keys and reconciliation apply.
+The composition passes the active outbox ID as provider `Idempotency-Key`.
+No automatic POST retry occurs; uncertain results await conservative synced
+outgoing evidence. Delivery=false is uncertain, never confirmed sent.
+
+The canonical pagination, sync checkpoints, rate/error policy and provider
+limitations are in [ADAPTERS.md](ADAPTERS.md#sideshift-platform-rest).

@@ -36,6 +36,7 @@ export interface AdapterOptions {
   instagramOfficial?: import("./instagram-official.js").InstagramOfficialOptions;
   instagramBoth?: import("./instagram-transport.js").InstagramBothOptions;
   email?: import("./email.js").EmailChannelOptions;
+  sideshift?: import("./sideshift.js").SideShiftOptions;
   tiktok?: import("./tiktok.js").TikTokOptions;
 }
 
@@ -51,7 +52,7 @@ export async function configuredChannels(
         .filter(Boolean),
     ),
   ];
-  const supported: ChannelId[] = ["imessage", "instagram", "email", "tiktok"];
+  const supported: ChannelId[] = ["imessage", "instagram", "email", "tiktok", "sideshift"];
   for (const id of ids)
     if (!supported.includes(id as ChannelId))
       throw new Error(`Unsupported configured channel: ${id}`);
@@ -71,6 +72,8 @@ export async function configuredChannels(
           ? (adapters.tiktok?.accountId ??
             env.ZERNIO_TIKTOK_ACCOUNT_ID ??
             "default")
+          : id === "sideshift"
+            ? (adapters.sideshift?.accountId ?? "default")
           : id === "email"
             ? (adapters.email?.accountId ?? "default")
             : (adapters.imessage?.accountId ?? "default");
@@ -120,6 +123,7 @@ export async function configuredChannels(
       if (!(adapters.tiktok?.accountId ?? env.ZERNIO_TIKTOK_ACCOUNT_ID)?.trim())
         missing.push("ZERNIO_TIKTOK_ACCOUNT_ID");
     }
+    if (id === "sideshift" && !(adapters.sideshift?.apiKey ?? env.SIDESHIFT_API_KEY)?.trim()) missing.push("SIDESHIFT_API_KEY");
     if (missing.length) {
       registry.disabled.set(id, {
         account_id: account,
@@ -174,6 +178,9 @@ export async function configuredChannels(
         fullApiKey: env.RESEND_FULL_API_KEY,
         ...adapters.email,
       });
+    } else if (id === "sideshift") {
+      const { createSideShiftChannel } = await import("./sideshift.js");
+      channel = createSideShiftChannel({ apiKey: env.SIDESHIFT_API_KEY, ...adapters.sideshift });
     } else {
       const { createTikTokChannel } = await import("./tiktok.js");
       channel = createTikTokChannel({

@@ -54,9 +54,9 @@ export class Inbox {
     }
   }
   list(input: { channels?: ChannelId[]; limit?: number } = {}) {
-    const channels = input.channels ?? ["email", "instagram", "tiktok"];
+    const channels = input.channels ?? ["email", "instagram", "tiktok", "sideshift"];
     const limit = input.limit ?? 100;
-    if (!channels.length || channels.some(c => !["email", "instagram", "tiktok", "imessage"].includes(c)) || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid inbox channels or limit");
+    if (!channels.length || channels.some(c => !["email", "instagram", "tiktok", "sideshift", "imessage"].includes(c)) || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid inbox channels or limit");
     return this.s.db.transaction(() => {
       this.settleAnswered();
       const config = this.config();

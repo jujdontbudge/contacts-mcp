@@ -1,5 +1,5 @@
 import { parsePhoneNumberFromString } from "libphonenumber-js";
-export type ChannelId = "imessage" | "instagram" | "email" | "tiktok";
+export type ChannelId = "imessage" | "instagram" | "email" | "tiktok" | "sideshift";
 export interface SendContent {
   text: string;
   subject?: string;
@@ -9,7 +9,7 @@ export interface SendContent {
   attachments?: { url: string; mimeType?: string; name?: string }[];
   reply_to_external_id?: string;
   kind?: string;
-  metadata?: { instagram_tag?: "HUMAN_AGENT" };
+  metadata?: { instagram_tag?: "HUMAN_AGENT"; sideshift_job_id?: string };
 }
 export interface SendTarget {
   person_id: string;
@@ -21,7 +21,18 @@ export interface SendTarget {
   conversationExternalId?: string;
   conversationKind?: "direct" | "group";
 }
+export interface HandleProfile {
+  channel: ChannelId;
+  account_id: string;
+  value: string;
+  display_name?: string;
+  profile_url?: string;
+  profile_image_url?: string;
+  job_ids?: string[];
+  related_handles?: { channel: ChannelId; value: string }[];
+}
 export interface IngestEvent {
+  handle_profiles?: HandleProfile[];
   channel: ChannelId;
   account_id: string;
   external_id: string;
@@ -50,6 +61,8 @@ export interface Channel {
   /** Resolve a configured/unique account before taking its durable sync lease. */
   resolveAccountId?(): Promise<string>;
   getCursor?(): string | undefined;
+  /** Identity discovery without fabricating messages or conversations. */
+  syncProfiles?(cursor?: string): AsyncIterable<HandleProfile>;
   /** Bounded background maintenance, e.g. refresh credentials when due. */
   maintenance?(): Promise<void>;
   capabilities: {
@@ -77,6 +90,7 @@ export interface Channel {
 export function normalizeHandle(channel: ChannelId, raw: string): string {
   const value = raw.trim();
   if (!value) throw new Error("Handle cannot be empty");
+  if (channel === "sideshift") return value; // Opaque creator IDs are case-sensitive.
   if ((channel === "tiktok" && /^tiktok:(user|account):/.test(value)) ||
       (channel === "instagram" && /^(beeper:user:|igsid:)/.test(value))) return value;
   if (channel === "imessage" && !value.includes("@")) {

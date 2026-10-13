@@ -40,11 +40,12 @@ export class ContactsCore {
     const rates: Partial<Record<ChannelId, number>> = {
       instagram: 20,
       tiktok: 10,
+      sideshift: 60,
       imessage: 60,
       email: 60,
       ...options.rateLimits,
     };
-    for (const c of ["imessage", "instagram", "email", "tiktok"] as const) {
+    for (const c of ["imessage", "instagram", "email", "tiktok", "sideshift"] as const) {
       const value = (options.env ?? process.env)[
         `CONTACTS_RATE_LIMIT_${c.toUpperCase()}`
       ];
@@ -68,6 +69,7 @@ export class ContactsCore {
   }
   ingest(event: IngestEvent) {
     return this.store.db.transaction(() => {
+      for (const profile of event.handle_profiles ?? []) this.handles.ingestProfile(profile);
       const message = this.conversations.ingest(event);
       this.outbox.reconcileFailed(message);
       for (const raw of [event.sender, ...(event.participants ?? [])]) {

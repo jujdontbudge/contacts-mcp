@@ -27,6 +27,7 @@ export class Store {
     if (!row) return undefined;
     const value = { ...(row as Record<string, unknown>) };
     for (const key of [
+      "profile",
       "aliases",
       "tags",
       "channels",

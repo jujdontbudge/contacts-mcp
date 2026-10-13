@@ -37,4 +37,5 @@ CREATE UNIQUE INDEX outbox_idempotency ON outbox(idempotency_key) WHERE idempote
 CREATE UNIQUE INDEX outbox_inbox_reply ON outbox(inbox_message_id) WHERE inbox_message_id IS NOT NULL;
 CREATE INDEX inbox_state ON inbox_handling(outcome,claim_expires_at);
 CREATE INDEX messages_inbox ON messages(direction,sent_at);`,
+  `ALTER TABLE handles ADD COLUMN profile TEXT;`,
 ];

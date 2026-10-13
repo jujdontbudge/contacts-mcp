@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ContactsCore } from "../core/index.js";
 const id = z.string().min(1);
-const channel = z.enum(["imessage", "instagram", "email", "tiktok"]);
+const channel = z.enum(["imessage", "instagram", "email", "tiktok", "sideshift"]);
 const actor = z
   .string()
   .trim()
@@ -57,10 +57,10 @@ const content = {
   attachments: z.array(attachment).optional(),
   reply_to_external_id: id.optional(),
   metadata: z
-    .object({ instagram_tag: z.literal("HUMAN_AGENT").optional() })
+    .object({ instagram_tag: z.literal("HUMAN_AGENT").optional(), sideshift_job_id: id.optional() })
     .optional()
     .describe(
-      "Explicit human support tag; requires Meta Human Agent approval, never for automated or promotional messages",
+      "Instagram human support tag requires Meta approval, never for automated or promotional messages. SideShift new applicant messages require sideshift_job_id (the job they applied to).",
     ),
   kind: id.optional().describe("Message category used by standing kind rules"),
 };

@@ -1,4 +1,4 @@
-import { type ChannelId } from "../channels/channel.js";
+import { type ChannelId, type HandleProfile } from "../channels/channel.js";
 import { ChannelRegistry } from "../channels/registry.js";
 import { Store } from "./store.js";
 import { Identity } from "./identity.js";
@@ -49,7 +49,7 @@ export class Handles {
     const id = this.s.id("h");
     this.s.db.transaction(() => {
       this.s.run(
-        "INSERT INTO handles VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO handles(id,channel,value_normalized,value_raw,person_id,account_id,created_at) VALUES (?,?,?,?,?,?,?)",
         id,
         input.channel,
         this.registry.normalize(input.channel, input.value),
@@ -163,6 +163,35 @@ export class Handles {
         reason: "Unknown participant",
       })
     );
+  }
+  /** Exact external links prove identity; public/social similarities remain suggestions. */
+  ingestProfile(profile: HandleProfile): Handle {
+    return this.s.db.transaction(() => {
+      const handle = this.ensure(profile.channel, profile.account_id, profile.value);
+      const previous = handle.profile;
+      const merged = { ...previous, ...profile,
+        job_ids: [...new Set([...(previous?.job_ids ?? []), ...(profile.job_ids ?? [])])],
+        related_handles: profile.related_handles?.length ? profile.related_handles : previous?.related_handles ?? [],
+      };
+      this.s.run("UPDATE handles SET profile=? WHERE id=?", JSON.stringify(merged), handle.id);
+      const exact = this.s.one<{ person_id: string }>(
+        "SELECT person_id FROM person_links WHERE system=? AND external_id=?", profile.channel, profile.value,
+      );
+      if (exact && !handle.person_id) this.link(handle.id, exact.person_id, "ingest", "Provider user ID matches stored external link", `${profile.channel}:${profile.value}`);
+      // Conflicting proof must never silently reassign an already linked handle.
+      if (exact && handle.person_id && exact.person_id !== handle.person_id) throw new Error("Provider identity conflicts with linked handle");
+      if (!this.get(handle.id).person_id) {
+        for (const related of merged.related_handles) {
+          const candidates = this.s.all<{ person_id: string }>("SELECT DISTINCT person_id FROM handles WHERE channel=? AND value_normalized=? AND person_id IS NOT NULL", related.channel, this.registry.normalize(related.channel, related.value));
+          for (const candidate of candidates) this.suggest(handle.id, candidate.person_id, `Provider profile lists ${related.channel}:${related.value}; public profile is not exact verified identity proof`, 0.9);
+        }
+        if (profile.display_name) for (const person of this.identity.list()) {
+          if ([person.display_name, ...person.aliases].some(name => name.trim().toLowerCase() === profile.display_name!.trim().toLowerCase()))
+            this.suggest(handle.id, person.id, `Provider display name ${profile.display_name}; requires exact proof`, 0.8);
+        }
+      }
+      return this.get(handle.id);
+    })();
   }
   events(id: string) {
     return this.s.all(

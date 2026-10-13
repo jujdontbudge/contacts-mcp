@@ -1,6 +1,6 @@
 # contacts-mcp
 
-One local source of person IDs, channel handles and conversations for AI agents. Provides SQLite identity, resolution, audited handle edits, an authorized outbox, all MCP tools, iMessage (imsg), Instagram (Beeper Desktop and official Meta API), email (Resend), TikTok (Zernio), and a daemon with authenticated HTTP. The fake adapter is only for offline tests.
+One local source of person IDs, channel handles and conversations for AI agents. Provides SQLite identity, resolution, audited handle edits, an authorized outbox, all MCP tools, iMessage (imsg), Instagram (Beeper Desktop and official Meta API), email (Resend), TikTok (Zernio), SideShift (Platform REST), and a daemon with authenticated HTTP. The fake adapter is only for offline tests.
 
 ## Setup and agent connections
 
@@ -10,7 +10,7 @@ Use Node 24 and npm, then copy the environment template and fill in only the cha
 cd /Users/johansardar/contacts-mcp
 npm ci
 cp .env.example .env
-# Edit .env: CONTACTS_CHANNELS=imessage,instagram,email,tiktok plus required keys.
+# Edit .env: CONTACTS_CHANNELS=imessage,instagram,email,tiktok,sideshift plus required keys.
 npm run build
 ```
 
@@ -62,7 +62,7 @@ Agent workflow: `find_person` → inspect candidates and pick a person ID → `s
 ## Environment
 
 - `CONTACTS_DB`: SQLite path; CLI default `<repo-root>/data/contacts.db`.
-- `CONTACTS_RATE_LIMIT_IMESSAGE`, `CONTACTS_RATE_LIMIT_INSTAGRAM`, `CONTACTS_RATE_LIMIT_EMAIL`, `CONTACTS_RATE_LIMIT_TIKTOK`: integer per-channel outgoing sends/hour. Defaults are iMessage 60, Instagram 20, email 60 and TikTok 10. Zero blocks sends. Pending sends reserve slots across processes.
+- `CONTACTS_RATE_LIMIT_IMESSAGE`, `CONTACTS_RATE_LIMIT_INSTAGRAM`, `CONTACTS_RATE_LIMIT_EMAIL`, `CONTACTS_RATE_LIMIT_TIKTOK`, `CONTACTS_RATE_LIMIT_SIDESHIFT`: integer per-channel outgoing sends/hour. Defaults are iMessage 60, Instagram 20, email 60, TikTok 10 and SideShift 60. Zero blocks sends. Pending sends reserve slots across processes.
 
 The CLI loads the repo-root `.env`; process environment values take precedence. [`.env.example`](.env.example) documents every variable. Never commit credentials or the database.
 
@@ -82,7 +82,9 @@ npm run build
 - **Email:** configure Resend Sending with a verified `CONTACTS_EMAIL_FROM` (normally `outreach@excerlock.com`), `RESEND_API_KEY` for sends and `RESEND_FULL_API_KEY` for receiving and metadata. Configure Resend Receiving and forward the reply mailbox there. Optional `CONTACTS_EMAIL_REPLY_TO` controls the reply address. Two-minute polling; To/CC/BCC and stored RFC Message-ID threading are supported. A first outbound email needs a subject; a reply can inherit one. The composition bridge uses the dispatching outbox ID as the Resend idempotency key, durably stages sent metadata and reconciles through core after dispatch commits, including on restart. A send remains recorded if later metadata reconciliation fails; inspect the outbox before any retry. Missing provider Message-IDs are retried on later syncs, including after restart. Inbound replies first match stored ancestry, then normalized subject plus exact counterpart addresses. Outbound replies requiring an absent RFC ID remain blocked until reconciliation. For legacy splits, see [email-thread repair](ADAPTERS.md#repair-legacy-email-splits).
 - **TikTok:** set `ZERNIO_API_KEY` and `ZERNIO_TIKTOK_ACCOUNT_ID`; `ZERNIO_BASE_URL` defaults to `https://zernio.com/api`. Connect an eligible TikTok Business account through Zernio with messaging permissions and incoming DMs enabled. Two-minute polling. Requires an existing thread and an inbound within 48 hours; first DMs must be sent manually. The adapter also enforces ten business replies since the latest inbound. Live confirmation is still needed for Zernio's generic conversation endpoint accepting `platform=tiktok` (see adapter notes).
 
-All four channels persist cursors in `sync_state` under their actual account ID (iMessage/email use `default`). Cursors advance only after ingest, and failed passes preserve safe checkpoints. Live events do not advance history cursors. `sync_status` exposes last success, last error and enabled/disabled status. You can run one reconciliation without a daemon with `node dist/cli.js sync [channel]`.
+- **SideShift:** add `sideshift` to `CONTACTS_CHANNELS` and set `SIDESHIFT_API_KEY` (scopes: messages read/write, applicants read/write, jobs read). Uses `https://app.sideshift.app/api/oauth/v1` with `x-api-key`. Missing keys disable only this channel. Platform messaging has no webhooks; polls **every two minutes after each completed pass** (`CONTACTS_SYNC_INTERVAL_SIDESHIFT_MS`). Both support-channel applicant chats and DMs use the same contacts identity, history, outbox, authorization and inbox state. Applicant profiles are imported even before a conversation exists. Handles are case-sensitive SideShift user IDs under account `default`; display names, exposed profile/image URLs, job IDs and public social handles live in `handle.profile`. Exact stored `person_links` (`system: "sideshift"`, `external_id: <user ID>`) auto-link; public names/socials generate suggestions. Replies use the selected existing thread. New applicant messages require `metadata: {sideshift_job_id: "<job they applied to>"}`; no job widget is sent. Plain text only, up to 10,000 characters; no group sends, attachments or quote-replies. Defaults to 60 outgoing sends/hour in core. Provider rate headers add throttling/backoff. See [SideShift behavior and API limits](ADAPTERS.md#sideshift-platform-rest).
+
+All five channels persist cursors in `sync_state` under their actual account ID (iMessage/email use `default`). Cursors advance only after ingest, and failed passes preserve safe checkpoints. Live events do not advance history cursors. `sync_status` exposes last success, last error and enabled/disabled status. You can run one reconciliation without a daemon with `node dist/cli.js sync [channel]`.
 
 ## iMessage and daemon
 
@@ -100,11 +102,11 @@ HTTP clients must send `Authorization: Bearer <CONTACTS_HTTP_TOKEN>` on every re
 
 Additional environment variables:
 
-- `CONTACTS_CHANNELS`: comma-separated channel IDs; `imessage`, `instagram`, `email`, `tiktok` are supported. Empty disables adapters. Unknown IDs fail startup.
+- `CONTACTS_CHANNELS`: comma-separated channel IDs; `imessage`, `instagram`, `email`, `tiktok`, `sideshift` are supported. Empty disables adapters. Unknown IDs fail startup.
 - `CONTACTS_IMSG_PATH`: binary path; defaults to `/opt/homebrew/bin/imsg`.
 - `CONTACTS_HTTP_HOST` / `CONTACTS_HTTP_PORT`: defaults `127.0.0.1` / `8787`.
 - `CONTACTS_HTTP_TOKEN`: required, nonempty bearer token for `serve`.
-- `CONTACTS_SYNC_INTERVAL_<CHANNEL>_MS`: delay after a completed sync pass. Defaults: iMessage `30000`, Instagram `300000`, email `120000`, TikTok `120000`. Renewable SQLite leases prevent overlapping polls for the same channel/account across upgraded processes.
+- `CONTACTS_SYNC_INTERVAL_<CHANNEL>_MS`: delay after a completed sync pass. Defaults: iMessage `30000`, Instagram `300000`, email `120000`, TikTok `120000`, SideShift `120000`. Renewable SQLite leases prevent overlapping polls for the same channel/account across upgraded processes.
 
 `sync_status` reports cursors, last completed successful sync and most recent error for each channel/account. A sync read failure preserves the last completed backfill page or incremental pass checkpoint. Live events ingest independently and never advance the backfill cursor; periodic sync fills watch gaps. Watch exits restart with exponential backoff capped at 60 seconds. Handles remain unlinked until there is exact identity proof. Routing diagnostics from imsg remain in raw metadata; the adapter uses account `default` because AppleScript cannot select a sending account.
 
@@ -156,7 +158,7 @@ message timestamps strictly after the cutoff qualify, so old history imported
 later remains excluded. Moving the cutoff does not reset handled messages.
 
 - `list_inbox({channels?, limit?})` returns `{cutoff, items}` oldest first. Defaults
-  to email, Instagram and TikTok; **iMessage is personal and requires explicit
+  to email, Instagram, TikTok and SideShift; **iMessage is personal and requires explicit
   inclusion**. Each item includes the inbound, person `{id,name,tags}` (or null
   for unlinked senders), handle, conversation ID, latest five thread messages
   and handling state. Raw payloads are omitted. Limit defaults to 100 (max 1000).

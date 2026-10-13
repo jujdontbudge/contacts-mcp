@@ -1,4 +1,4 @@
-import type { ChannelId, SendContent, SendTarget } from "../channels/channel.js";
+import type { ChannelId, HandleProfile, SendContent, SendTarget } from "../channels/channel.js";
 export interface Person {
   id: string;
   display_name: string;
@@ -9,6 +9,7 @@ export interface Person {
   updated_at: string;
 }
 export interface Handle {
+  profile?: HandleProfile | null;
   id: string;
   channel: ChannelId;
   value_normalized: string;

@@ -160,3 +160,116 @@ Maintenance failures still permit history ingestion, but keep the pass failed. M
 Remaining limits are deliberate: older Beeper/TikTok edits or delayed history below a watermark need a cursor reset/backfill; iMessage's overlap covers only recent inserts; official Instagram exposes its latest 20 messages per thread. Reactions/deletions are retained where exposed in raw events or ignored where the API supplies no message, without inventing content. Beeper/official copies still need a provider-proven ID bridge for cross-source dedupe. Full Beeper/TikTok thread scans buffer one API-visible thread; extremely large threads remain a memory-bound provider-pagination limitation. Mixed old/new running processes do not share the new lease protocol; activate one version consistently when the operator rolls it out. This implementation did not restart the daemon or validate live provider delivery.
 
 The existing creator-dashboard contacts adapter can display `reconciled_at` and the preserved error in its approval/outbox view, and consume sync health through its existing scheduled jobs. No parallel tracker or creator-domain coupling is needed.
+
+## SideShift Platform REST
+
+`src/channels/sideshift.ts` uses injected native fetch against
+`https://app.sideshift.app/api/oauth/v1`, authenticated with `x-api-key`.
+Enable with `CONTACTS_CHANNELS=...,sideshift` and `SIDESHIFT_API_KEY`.
+The granted messages/applicants/jobs scopes suffice; `/company` needs additional
+`settings:read` and is deliberately not called. Job records expose the tenant
+company ID. Keep this key bound to one company; the saved cursor rejects a
+changed discovered tenant. The logical account is `default` (injectable in
+adapter tests). Keys never enter status, stored errors or logs.
+
+Platform messaging has **no webhooks**. The daemon polls every **120,000 ms
+after a completed pass**, overridden by `CONTACTS_SYNC_INTERVAL_SIDESHIFT_MS`.
+It reads `/jobs?limit=100`, then every `/applicants?jobId=...` page for profile
+observations, followed by every `/support-channels` and `/conversations` page
+and every thread's message page. Support channels are the primary applicant
+chat; DMs remain supported. Lists use `{data,nextCursor,hasMore}`, forwarding
+opaque cursors to the fixed endpoint. Missing/repeated cursors fail sync.
+Messages are locally sorted oldest first; native support rooms appearing in
+both lists are read once and stored under `support:<id>`. DM routes use
+`dm:<id>`. Provider support IDs exposed as DM `channelId` also deduplicate.
+External message IDs namespace the logical account, remote thread ID and
+provider message ID, matching the send result to its synced echo.
+
+Version-1 base64url JSON cursors store the account, discovered company and
+per-thread timestamp plus all IDs tied at that timestamp. A completed thread
+checkpoints only after yielded events have been ingested. Failed pages or
+ingestions replay from the last safe checkpoint. Message IDs at the same
+watermark timestamp remain discoverable. All API-visible history is read;
+emissions below a watermark are skipped. Historical imports/edits dated below
+a watermark require resetting the cursor/backfill, as with TikTok. One thread
+is buffered at a time; listing metadata is buffered to deduplicate the two
+surfaces and prove counterpart vs company membership. Leases and inbox state
+remain owned by core.
+
+`handles.profile` retains SideShift display name, any exposed profile URL/image,
+public Instagram/TikTok handles and applicant job IDs, without inventing a
+public profile URL from an opaque ID. The current live applicant/message shapes
+do not supply a public SideShift profile URL. Use the user ID for API identity.
+If `person_links` already proves that exact `sideshift` user ID, core links it
+with an audit entry; existing handle links are preserved and conflicts fail.
+Public social handles/names are suggestions, not verified ownership proof.
+Only counterpart profiles become recipients. Native `participants` projects
+counterpart users; `members` additionally includes company identities. Company
+IDs from jobs and the member-minus-counterpart projection identify outgoing
+company/member messages. Support channels have one customer, so other resolved
+senders are outgoing company actors. Unresolved provider customers use
+`provider:<external user ID>` unlinked handles; unknown message direction fails
+closed. No creator or person is guessed from a display name.
+
+Every send runs through core outbox/drafts and authorization. The composition's
+AsyncLocalStorage bridge supplies the dispatching outbox ID as `Idempotency-Key`;
+missing dispatch context fails before HTTP. Existing support replies POST
+`/support-channels/{id}/messages` with `{content}`. Existing DM replies POST
+`/messages` with `{conversationId,content}`. New applicant messages POST
+`/applicants/message` with `{applicantId,jobId,message,includeJobLink:false}`;
+`jobId` must be explicitly supplied as `metadata.sideshift_job_id`, retained in
+the approval payload. No standalone channel creation, job widget, recruit invite
+or other mutation is performed. Only text (1–10,000 characters) is supported.
+Group sends, uploaded provider attachment IDs, local/remote media and quote
+replies are refused. A DM `delivered:false`, malformed send response, timeout,
+transport error or server failure is uncertain. No POST is retried. The same
+permanent core key returns the original outbox; late synced outgoing messages
+can settle failed/keyed crash entries using existing target/text/time/sequence
+proof. A successful echo preserves the locally stored sent message ID.
+
+Core defaults to 60 outgoing messages/hour, overridden by
+`CONTACTS_RATE_LIMIT_SIDESHIFT`. Provider limits additionally apply: 600 resource
+requests/minute, 60 messaging writes/minute, 10 conversation creations/minute.
+Requests serialize per adapter. `X-RateLimit-Remaining: 0` pauses until the epoch
+seconds `X-RateLimit-Reset`; 429 honors `Retry-After` or
+`error.meta.retryAfterSeconds`, with exponential backoff and jitter. GET retries
+are bounded to three; POST errors only set the backoff for subsequent requests.
+`SideShiftError` exposes safe code/status/uncertainty classes, with allowlisted
+provider codes; provider error messages and transport exception strings are
+never echoed (they may contain the credential).
+
+API gaps/limits: `/jobs` is non-paginated and capped at 100; reaching that cap
+fails applicant discovery rather than silently declaring it complete. DM
+`source:stored` is an outbound/system mirror, not full two-way history; support
+reads have no stored fallback. Unresolved identities/directions fail visibly.
+Edits/deletions/reactions and native attachment counts remain in raw metadata;
+attachment bytes are not downloaded and unavailable content is not invented.
+Provider idempotency expires after roughly 24 hours; core's keys are permanent.
+No webhook guarantee or exactly-once delivery is claimed.
+
+Docs checked 2026-10-12/13 and exact REST shapes validated with live GETs:
+[list support channels](https://docs.sideshift.app/platform/oauth/messages/list-support-channels.md),
+[support messages](https://docs.sideshift.app/platform/oauth/messages/list-messages-in-a-support-channel.md),
+[support send](https://docs.sideshift.app/platform/oauth/messages/send-a-support-channel-message.md),
+[DM list](https://docs.sideshift.app/platform/oauth/messages/list-conversations.md),
+[DM messages](https://docs.sideshift.app/platform/oauth/messages/list-messages-in-a-conversation.md),
+[DM send](https://docs.sideshift.app/platform/oauth/messages/send-a-message.md),
+[applicants](https://docs.sideshift.app/platform/oauth/applicants/list-job-applicants.md),
+[applicant message flow](https://docs.sideshift.app/platform/oauth/applicants/send-a-new-message-to-an-applicant.md),
+[errors/rates/idempotency](https://docs.sideshift.app/platform/errors.md).
+Offline tests use synthetic documented shapes and a fake HTTP layer; no live
+POST is part of validation. The existing 15-minute inbox automation sees this
+channel by default. The creator-dashboard contacts composition can show these
+same drafts, profile link suggestions and sync-health errors in its approval
+inbox and scheduled jobs; no separate tracker or section coupling is needed.
+
+Read-only daemon acceptance on 2026-10-13 UTC: restarted launchd
+`com.contacts-mcp.daemon`, then `sync_status` reported enabled with a saved cursor,
+completed success and no error. Both lists exposed the same 28 native support
+rooms; all were imported once (no missing room IDs). Stored counts: 28 support
+conversations, 121 messages (43 inbound / 78 outbound), 173 creator profiles
+including 166 applicants. No company IDs were conversation participants and the
+SideShift outbox had zero records. This account had no separate DM room in the
+live sample; DM behavior and sends were validated offline only. No live message
+was sent. Existing historical messages respect the already configured inbox
+cutoff; this rollout did not change the cutoff or activate sending permissions.
