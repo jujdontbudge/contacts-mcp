@@ -176,8 +176,9 @@ Platform messaging has **no webhooks**. The daemon polls every **120,000 ms
 after a completed pass**, overridden by `CONTACTS_SYNC_INTERVAL_SIDESHIFT_MS`.
 It reads `/jobs?limit=100`, then every `/applicants?jobId=...` page for profile
 observations, followed by every `/support-channels` and `/conversations` page
-and every thread's message page. Support channels are the primary applicant
-chat; DMs remain supported. Lists use `{data,nextCursor,hasMore}`, forwarding
+and every thread's message page. Support channels include native recruit/applicant
+chats (UUID rooms); DMs remain supported. Lists use `{data,nextCursor,hasMore}`,
+forwarding
 opaque cursors to the fixed endpoint. Missing/repeated cursors fail sync.
 Messages are locally sorted oldest first; native support rooms appearing in
 both lists are read once and stored under `support:<id>`. DM routes use
@@ -188,7 +189,10 @@ provider message ID, matching the send result to its synced echo.
 Version-1 base64url JSON cursors store the account, discovered company and
 per-thread timestamp plus all IDs tied at that timestamp. A completed thread
 checkpoints only after yielded events have been ingested. Failed pages or
-ingestions replay from the last safe checkpoint. Message IDs at the same
+ingestions replay from the last safe checkpoint. An optional `unresolved` map
+retains skipped message IDs per thread; if identity becomes resolvable on a later
+pass, those IDs replay even below the watermark without moving it backwards.
+Message IDs at the same
 watermark timestamp remain discoverable. All API-visible history is read;
 emissions below a watermark are skipped. Historical imports/edits dated below
 a watermark require resetting the cursor/backfill, as with TikTok. One thread
@@ -206,10 +210,14 @@ Public social handles/names are suggestions, not verified ownership proof.
 Only counterpart profiles become recipients. Native `participants` projects
 counterpart users; `members` additionally includes company identities. Company
 IDs from jobs and the member-minus-counterpart projection identify outgoing
-company/member messages. Support channels have one customer, so other resolved
-senders are outgoing company actors. Unresolved provider customers use
-`provider:<external user ID>` unlinked handles; unknown message direction fails
-closed. No creator or person is guessed from a display name.
+company/member messages. A non-customer sender ID alone is not proof of company
+membership. Unresolved provider customers use `provider:<external user ID>`
+unlinked handles. Unknown message direction skips that individual message and
+retains its ID for retry; a safe aggregate warning is recorded in
+`sync_status.last_error` while the completed pass advances `last_ok_at` and its
+cursor. Other records/threads still sync. Malformed payloads, page failures and
+tenant changes still fail the pass. No creator, company actor or message
+direction is guessed from a display name.
 
 Every send runs through core outbox/drafts and authorization. The composition's
 AsyncLocalStorage bridge supplies the dispatching outbox ID as `Idempotency-Key`;
@@ -241,7 +249,8 @@ never echoed (they may contain the credential).
 API gaps/limits: `/jobs` is non-paginated and capped at 100; reaching that cap
 fails applicant discovery rather than silently declaring it complete. DM
 `source:stored` is an outbound/system mirror, not full two-way history; support
-reads have no stored fallback. Unresolved identities/directions fail visibly.
+reads have no stored fallback. Unresolved thread identities fail visibly;
+unresolved message directions are skipped with a visible warning.
 Edits/deletions/reactions and native attachment counts remain in raw metadata;
 attachment bytes are not downloaded and unavailable content is not invented.
 Provider idempotency expires after roughly 24 hours; core's keys are permanent.
@@ -273,3 +282,23 @@ SideShift outbox had zero records. This account had no separate DM room in the
 live sample; DM behavior and sends were validated offline only. No live message
 was sent. Existing historical messages respect the already configured inbox
 cutoff; this rollout did not change the cutoff or activate sending permissions.
+
+Read-only recruit acceptance on 2026-10-14 UTC (2026-10-13 Chicago): both
+message endpoints return creator IDs for replies and the company ID for manual
+briefs, but the original brand invites have null sender identity fields. A brand
+display name is insufficient proof, so these invites are omitted with a retryable
+warning. Their embedded job cards are absent from the REST response. This means
+an unanswered conversation whose invite is omitted must be escalated when an
+inbox rule requires that invite as context; do not relax the rule or guess its
+origin. A provider identity fix is needed to import those invite messages safely.
+The redacted live shapes are in `tests/fixtures/sideshift/recruit.json`; tests
+cover sync continuation, warning persistence/clearing, retry below the watermark,
+inbox reconciliation, and authorized same-room replies without live POSTs.
+
+Local disposable-database validation imported 32 conversations and 129 messages
+(47 inbound, 82 outbound). P Hudson, Andrea, Shruti and Dakota McGaughy each had
+one creator reply (`in`) and one later manual brief (`out`); their four original
+ID-less invites were the only skipped messages. A repeat pass with a GET-only
+transport imported no duplicates, completed with the same warning, and left the
+outbox empty. Existing inbox reconciliation excluded the already-briefed replies.
+No creator message was sent and no Air deployment was performed.

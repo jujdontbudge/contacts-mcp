@@ -167,12 +167,13 @@ export class ContactsCore {
     account: string,
     cursor: string | null,
     error: string | null,
+    completed = error === null,
   ): void {
     this.ensureSyncState(channel, account);
     this.store.run(
-      "UPDATE sync_state SET cursor=COALESCE(?,cursor),last_ok_at=CASE WHEN ? IS NULL THEN ? ELSE last_ok_at END,last_error=? WHERE channel=? AND account_id=?",
+      "UPDATE sync_state SET cursor=COALESCE(?,cursor),last_ok_at=CASE WHEN ? THEN ? ELSE last_ok_at END,last_error=? WHERE channel=? AND account_id=?",
       cursor,
-      error,
+      completed ? 1 : 0,
       this.store.now(),
       error,
       channel,

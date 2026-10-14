@@ -73,7 +73,7 @@ export async function syncChannel(
     cursor = channel.getCursor?.() ?? cursor;
     core.store.db.transaction(() => {
       assertLease();
-      core.recordSync(channel.id, account, cursor ?? null, null);
+      core.recordSync(channel.id, account, cursor ?? null, channel.getSyncWarning?.() ?? null, true);
     }).immediate();
   } catch (error) {
     core.store.db.transaction(() => {

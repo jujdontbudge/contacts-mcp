@@ -2,7 +2,7 @@ import { normalizeHandle, type Channel, type HandleProfile, type IngestEvent, ty
 
 type RecordValue = Record<string, unknown>;
 type Mark = { time: string; ids: string[] };
-type Cursor = { version: 1; accountId: string; companyId?: string; conversations: Record<string, Mark> };
+type Cursor = { version: 1; accountId: string; companyId?: string; conversations: Record<string, Mark>; unresolved?: Record<string, string[]> };
 type Thread = { type: "support" | "dm"; id: string; raw: RecordValue; peers: RecordValue[]; own: string[] };
 export interface SideShiftOptions {
   apiKey?: string;
@@ -40,6 +40,7 @@ export function createSideShiftChannel(opts: SideShiftOptions = {}): Channel & {
   const random = opts.random ?? Math.random;
   const empty = (): Cursor => ({ version: 1, accountId, conversations: Object.create(null) });
   let state = empty();
+  let skipped = 0;
   let companyId: string | undefined;
   let jobs: RecordValue[] | undefined;
   let blockedUntil = 0;
@@ -54,7 +55,8 @@ export function createSideShiftChannel(opts: SideShiftOptions = {}): Channel & {
         const item = object(mark);
         if (!string(item.time) || !Number.isFinite(Date.parse(item.time as string)) || !Array.isArray(item.ids) || !item.ids.every(id => typeof id === "string")) throw new Error();
       }
-      return { version: 1, accountId, companyId: string(parsed.companyId), conversations: Object.assign(Object.create(null), parsed.conversations) } as Cursor;
+      if (parsed.unresolved !== undefined && (!parsed.unresolved || Array.isArray(parsed.unresolved) || typeof parsed.unresolved !== "object" || Object.values(object(parsed.unresolved)).some(ids => !Array.isArray(ids) || !ids.every(id => typeof id === "string")))) throw new Error();
+      return { version: 1, accountId, unresolved: Object.assign(Object.create(null), parsed.unresolved), companyId: string(parsed.companyId), conversations: Object.assign(Object.create(null), parsed.conversations) } as Cursor;
     } catch { throw new Error("Invalid SideShift sync cursor or account mismatch"); }
   }
   async function perform(path: string, params: Record<string, string>, body?: RecordValue, key?: string): Promise<RecordValue> {
@@ -160,21 +162,19 @@ export function createSideShiftChannel(opts: SideShiftOptions = {}): Channel & {
     }
     return [...result.values()];
   }
-  function mapMessage(thread: Thread, message: RecordValue): IngestEvent {
+  function mapMessage(thread: Thread, message: RecordValue): IngestEvent | undefined {
     const id = required(message.id, "message id");
     const timestamp = required(message.createdAt ?? message.timestamp, "message timestamp");
     if (!Number.isFinite(Date.parse(timestamp))) throw new Error("SideShift response has invalid message timestamp");
-    const remoteIds = thread.peers.map(p => string(p.id)).filter((id): id is string => !!id);
     const senderId = string(message.senderUserId);
     const senderExternal = string(message.senderExternalUserId);
     const peer = thread.peers.find(p => (senderId && p.id === senderId) || (senderExternal && p.externalUserId === senderExternal));
     const isOwn = senderId ? thread.own.includes(senderId) : false;
-    // A support channel has one customer. Other resolved users are company senders;
-    // they remain outgoing sender metadata, never messageable participants.
-    const supportOwn = thread.type === "support" && senderId && remoteIds.length === 1 && !peer;
     const storedOwn = message.source === "stored" && string(message.sender) && thread.own.includes(String(message.sender));
-    const direction = peer ? "in" : isOwn || supportOwn || storedOwn ? "out" : undefined;
-    if (!direction) throw new Error("SideShift sender identity unresolved; refusing to guess message direction");
+    const direction = peer ? "in" : isOwn || storedOwn ? "out" : undefined;
+    // Native recruit invites can have only a display name and null identity fields.
+    // A name (even the brand's) is not identity proof. Skip only this message.
+    if (!direction) return undefined;
     const sender = senderId ?? (peer ? `provider:${required(senderExternal, "provider sender id")}` : companyId ?? required(message.sender, "stored sender id"));
     const participants = thread.peers.map(p => string(p.id) ?? (string(p.externalUserId) ? `provider:${p.externalUserId}` : undefined)).filter((id): id is string => !!id && !thread.own.includes(id));
     const attachments = (Array.isArray(message.attachments) ? message.attachments : []).map(object).filter(a => string(a.url)).map(a => ({ url: String(a.url), ...(string(a.mimeType) ? { mimeType: String(a.mimeType) } : {}), ...(string(a.name) ? { name: String(a.name) } : {}) }));
@@ -189,6 +189,7 @@ export function createSideShiftChannel(opts: SideShiftOptions = {}): Channel & {
   return {
     id: "sideshift", accountId, capabilities: { startConversation: true, groups: false, cc: false },
     normalizeHandle: raw => normalizeHandle("sideshift", raw), getCursor: cursor,
+    getSyncWarning: () => skipped ? `SideShift ${skipped} message(s) skipped: sender identity unresolved; refusing to guess message direction; retained for retry` : undefined,
     async *syncProfiles(saved) {
       const previous = saved ? decode(saved) : undefined;
       await loadJobs();
@@ -199,6 +200,7 @@ export function createSideShiftChannel(opts: SideShiftOptions = {}): Channel & {
       }
     },
     async *sync(saved, checkpoint) {
+      skipped = 0;
       state = saved ? decode(saved) : empty();
       if (!jobs) await loadJobs();
       if (state.companyId && companyId && state.companyId !== companyId) throw new Error("SideShift sync tenant changed; configure a separate account/database");
@@ -207,17 +209,27 @@ export function createSideShiftChannel(opts: SideShiftOptions = {}): Channel & {
         for (const thread of await threads()) {
           const key = `${thread.type}:${thread.id}`;
           const previous = state.conversations[key];
+          const retry = new Set(state.unresolved?.[key] ?? []);
+          const unresolved = new Set<string>();
           const events = new Map<string, IngestEvent>();
           for await (const message of pages(`/${thread.type === "support" ? "support-channels" : "conversations"}/${encodeURIComponent(thread.id)}/messages`)) {
             const event = mapMessage(thread, message);
+            if (!event) {
+              unresolved.add(external(thread.id, required(message.id, "message id")));
+              continue;
+            }
             events.set(event.external_id, event);
           }
           for (const event of [...events.values()].sort((a, b) => a.sent_at.localeCompare(b.sent_at) || a.external_id.localeCompare(b.external_id))) {
-            if (previous && (event.sent_at < previous.time || (event.sent_at === previous.time && previous.ids.includes(event.external_id)))) continue;
+            if (!retry.has(event.external_id) && previous && (event.sent_at < previous.time || (event.sent_at === previous.time && previous.ids.includes(event.external_id)))) continue;
             yield event;
             const mark = state.conversations[key];
-            state.conversations[key] = { time: event.sent_at, ids: mark?.time === event.sent_at ? [...new Set([...mark.ids, event.external_id])] : [event.external_id] };
+            if (!mark || event.sent_at >= mark.time) state.conversations[key] = { time: event.sent_at, ids: mark?.time === event.sent_at ? [...new Set([...mark.ids, event.external_id])] : [event.external_id] };
           }
+          state.unresolved ??= Object.create(null);
+          if (unresolved.size) state.unresolved![key] = [...unresolved];
+          else delete state.unresolved![key];
+          skipped += unresolved.size;
           checkpoint?.(cursor());
         }
       } finally { jobs = undefined; }

@@ -27,7 +27,7 @@ const support = { id: "support/1", chatType: "native", customerUserId: "CreatorC
 const dm = { id: "dm-1", chatType: "native", members: ["Company", "TeamMember", "CreatorCase"], participants: [{ id: "CreatorCase", name: "Alice" }] };
 const message = (id: string, sender = "CreatorCase", text = "Hello", time = "2026-10-12T11:00:00Z") => ({ id, senderUserId: sender, content: text, createdAt: time, source: "native", senderName: sender === "CreatorCase" ? "Alice" : "Employer", futureField: true });
 const page = (data: unknown[], nextCursor: string | null = null) => ({ data, nextCursor, hasMore: !!nextCursor });
-function httpHarness() {
+function httpHarness(now = clock) {
   const calls: { url: URL; init?: RequestInit }[] = [];
   const reads = new Map<string, unknown>([
     ["/jobs", { data: [{ id: "job-1", companyId: "Company" }] }],
@@ -46,15 +46,15 @@ function httpHarness() {
     if (init?.method === "POST") {
       sendCount++;
       const body = JSON.parse(String(init.body));
-      const thread = path === "/applicants/message" ? "new-support" : path === "/messages" ? body.conversationId : "support/1";
+      const thread = path === "/applicants/message" ? "new-support" : path === "/messages" ? body.conversationId : decodeURIComponent(path.match(/^\/support-channels\/(.+)\/messages$/)![1]);
       const route = path === "/messages" ? "/conversations/dm-1/messages" : `/support-channels/${encodeURIComponent(thread)}/messages`;
-      const sent = message("sent-1", "Company", body.content ?? body.message, clock().toISOString());
+      const sent = message("sent-1", (reads.get("/jobs") as { data: { companyId: string }[] }).data[0].companyId, body.content ?? body.message, now().toISOString());
       reads.set(route, page([...((reads.get(route) as { data: unknown[] })?.data ?? []), sent]));
       if (thread === "new-support") reads.set("/support-channels", page([support, { ...support, id: thread }]));
       if (uncertain) throw new Error("network failure containing offline-secret");
       const data = path === "/applicants/message" ? { success: true, supportChannelId: thread, messageIds: ["sent-1"] }
         : path === "/messages" ? { delivered, conversationId: thread, messageId: "sent-1", externalMessageId: null }
-        : { delivered, channelId: thread, id: "sent-1", createdAt: clock().toISOString() };
+        : { delivered, channelId: thread, id: "sent-1", createdAt: now().toISOString() };
       return Response.json({ data }, { status: 201 });
     }
     const key = path + (url.searchParams.get("cursor") ? `?cursor=${url.searchParams.get("cursor")}` : "");
@@ -66,8 +66,8 @@ function httpHarness() {
 }
 async function collect(events: AsyncIterable<IngestEvent>) { const result = []; for await (const e of events) result.push(e); return result; }
 const sendTarget: SendTarget = { person_id: "p", handle_id: "h", handle: "CreatorCase", channel: "sideshift", account_id: "default", conversationExternalId: "support:support/1", conversationKind: "direct" };
-async function system(fake: ReturnType<typeof httpHarness>) {
-  return createContactsSystem({ path: ":memory:", clock, env: { CONTACTS_CHANNELS: "sideshift", SIDESHIFT_API_KEY: "offline-secret" }, adapters: { sideshift: { fetch: fake.http } } });
+async function system(fake: ReturnType<typeof httpHarness>, systemClock = clock) {
+  return createContactsSystem({ path: ":memory:", clock: systemClock, env: { CONTACTS_CHANNELS: "sideshift", SIDESHIFT_API_KEY: "offline-secret" }, adapters: { sideshift: { fetch: fake.http } } });
 }
 
 describe("SideShift REST adapter (offline)", () => {
@@ -277,7 +277,7 @@ it("refuses sends without durable dispatch context", async () => {
   const fake = httpHarness(); const adapter = createSideShiftChannel({ apiKey: "offline-secret", fetch: fake.http });
   await expect(adapter.send(sendTarget, { text: "Hi" })).rejects.toThrow("active outbox dispatch ID"); expect(fake.calls).toHaveLength(0);
 });
-it("retains unresolved provider customer IDs and refuses unknown DM direction", async () => {
+it("retains unresolved provider customer IDs and skips unknown DM direction", async () => {
   const fake = httpHarness();
   fake.reads.set("/support-channels", page([{ ...support, customerUserId: null, customerUser: { externalUserId: "provider-peer", name: "Unknown" } }]));
   fake.reads.set("/conversations", page([]));
@@ -287,7 +287,8 @@ it("retains unresolved provider customer IDs and refuses unknown DM direction", 
   expect(events.find(e => e.direction === "in")).toMatchObject({ sender: "provider:provider-peer", participants: ["provider:provider-peer"] });
   fake.reads.set("/conversations", page([dm]));
   fake.reads.set("/conversations/dm-1/messages", page([{ ...message("unknown"), senderUserId: null, senderExternalUserId: null, sender: "A display name" }]));
-  await expect(collect(adapter.sync())).rejects.toThrow("refusing to guess message direction");
+  expect((await collect(adapter.sync())).every(e => e.conversation_external_id !== "dm:dm-1")).toBe(true);
+  expect(adapter.getSyncWarning?.()).toContain("refusing to guess message direction");
 });
 it("rejects changed tenants before importing profiles and refuses conflicting exact identity", async () => {
   const fake = httpHarness(); const adapter = createSideShiftChannel({ apiKey: "offline-secret", fetch: fake.http });
@@ -307,4 +308,117 @@ it("does not mistake every member for the employer when counterpart profiles are
   const fake = httpHarness(); fake.reads.set("/conversations", page([{ ...dm, participants: [] }]));
   const adapter = createSideShiftChannel({ apiKey: "offline-secret", fetch: fake.http });
   await expect(collect(adapter.sync())).rejects.toMatchObject({ code: "participant_identity_unresolved" });
+});
+
+// Redacted live GET payloads captured 2026-10-14 UTC (2026-10-13 Chicago).
+import recruit from "./fixtures/sideshift/recruit.json";
+const recruitClock = () => new Date("2026-10-14T12:00:00Z");
+function recruitHarness(nativeOnly = false) {
+  const fake = httpHarness(recruitClock);
+  fake.reads.set("/jobs", recruit.jobs);
+  fake.reads.set("/applicants", page([]));
+  fake.reads.set("/support-channels", nativeOnly ? page([]) : recruit.supportChannels);
+  fake.reads.set("/conversations", recruit.conversations);
+  fake.reads.set("/support-channels/recruit-room/messages", recruit.messages);
+  fake.reads.set("/conversations/recruit-room/messages", recruit.messages);
+  return fake;
+}
+it.each([false, true])("ingests recruit replies despite an ID-less invite, recording safe warnings (native only=%s)", async nativeOnly => {
+  const fake = recruitHarness(nativeOnly); const { core, registry } = await system(fake, recruitClock);
+  try {
+    await syncChannel(core, registry.get("sideshift"));
+    const rows = core.store.all("SELECT direction,text FROM messages ORDER BY sent_at");
+    expect(rows).toEqual([{ direction: "in", text: "Yes, interested." }, { direction: "out", text: "Here is our brief: https://example.invalid/brief" }]);
+    expect(core.conversations.list()).toHaveLength(1);
+    expect(core.syncStatus()[0]).toMatchObject({ last_ok_at: "2026-10-14T12:00:00.000Z", last_error: expect.stringContaining("1 message(s) skipped") });
+    core.inbox.setCutoff("2026-10-14T00:00:00Z", "test");
+    // The real sample already has a later manual brief, so inbox settles that reply.
+    expect(tools(core).list_inbox.call({}).items).toEqual([]);
+    fake.reads.set("/support-channels/recruit-room/messages", unansweredRecruitMessages());
+    await syncChannel(core, registry.get("sideshift"));
+    const items = tools(core).list_inbox.call({}).items;
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toBe("Fixture follow-up");
+    expect(fake.calls.every(c => c.init?.method === "GET")).toBe(true);
+  } finally { core.close(); }
+});
+it("retries skipped older identities across cursor restart, then clears the warning without duplicating replies", async () => {
+  const fake = recruitHarness(); const { core, registry } = await system(fake, recruitClock);
+  try {
+    await syncChannel(core, registry.get("sideshift"));
+    const saved = core.syncStatus()[0].cursor!;
+    const corrected = structuredClone(recruit.messages);
+    corrected.data[2].senderUserId = "company-id";
+    fake.reads.set("/support-channels/recruit-room/messages", corrected);
+    const fresh = createSideShiftChannel({ apiKey: "offline-secret", fetch: fake.http });
+    const events = await collect(fresh.sync(saved));
+    expect(events.map(e => [e.direction, e.text])).toEqual([["out", "Thank you for applying. Are you interested?"]]);
+    // Exercise the persisted core warning clearing on another completed pass.
+    await syncChannel(core, registry.get("sideshift"));
+    expect(core.store.all("SELECT id FROM messages")).toHaveLength(3);
+    expect(core.syncStatus()[0].last_error).toBeNull();
+    expect(await collect(fresh.sync(fresh.getCursor()))).toEqual([]);
+  } finally { core.close(); }
+});
+it("does not infer support senders from an unknown ID or company display name", async () => {
+  const fake = recruitHarness();
+  fake.reads.set("/support-channels/recruit-room/messages", page([
+    ...recruit.messages.data,
+    { ...recruit.messages.data[0], id: "unknown-member", senderUserId: "unknown-id", sender: "Fixture Brand" },
+  ]));
+  const { core, registry } = await system(fake, recruitClock);
+  try {
+    await syncChannel(core, registry.get("sideshift"));
+    expect(core.store.all("SELECT id FROM messages")).toHaveLength(2);
+    expect(core.syncStatus()[0].last_error).toContain("2 message(s) skipped");
+  } finally { core.close(); }
+});
+it("routes an authorized recruit inbox reply to the same native support room (offline only)", async () => {
+  const fake = recruitHarness();
+  fake.reads.set("/support-channels/recruit-room/messages", unansweredRecruitMessages());
+  const { core, registry } = await system(fake, recruitClock);
+  try {
+    const creator = core.identity.create({ display_name: "Fixture Creator", links: [{ system: "sideshift", external_id: "creator-id" }] });
+    await syncChannel(core, registry.get("sideshift"));
+    core.inbox.setCutoff("2026-10-14T00:00:00Z", "test");
+    const item = tools(core).list_inbox.call({}).items[0];
+    const claim = core.inbox.claim({ message_ids: [item.id], actor: "test" });
+    const result = await core.outbox.send({ person_id: creator.id, conversation_id: item.conversation_id, text: "Offline reply", created_by: "test", authorized_by: "owner", reason: "Offline fixture test", idempotency_key: "recruit-reply", inbox_message_id: item.id, claim_token: claim.claim_token });
+    expect(result.status).toBe("sent");
+    const post = fake.calls.find(c => c.init?.method === "POST")!;
+    expect(post.url.pathname).toBe("/api/oauth/v1/support-channels/recruit-room/messages");
+    expect(JSON.parse(String(post.init?.body))).toEqual({ content: "Offline reply" });
+    expect(core.conversations.list(creator.id)).toHaveLength(1);
+    await syncChannel(core, registry.get("sideshift"));
+    expect(core.store.all("SELECT id FROM messages WHERE text='Offline reply'")).toEqual([{ id: result.sent_message_id }]);
+    expect(fake.sendCount).toBe(1);
+    core.inbox.mark({ message_id: item.id, claim_token: claim.claim_token, outcome: "auto_replied", actor: "test", note: "Offline reply", outbox_id: result.id });
+  } finally { core.close(); }
+});
+
+function unansweredRecruitMessages() {
+  return page([...recruit.messages.data, { ...recruit.messages.data[1], id: "follow-up-id", content: "Fixture follow-up", createdAt: "2026-10-14T02:00:00Z", timestamp: "2026-10-14T02:00:00Z" }]);
+}
+
+it("recognizes company members from native metadata, never adding them as recruit recipients", async () => {
+  const fake = recruitHarness();
+  const conversation = structuredClone(recruit.conversations);
+  conversation.data[0].members.push("team-user-id");
+  fake.reads.set("/conversations", conversation);
+  fake.reads.set("/support-channels/recruit-room/messages", page([{ ...recruit.messages.data[0], id: "team-message", senderUserId: "team-user-id" }]));
+  const adapter = createSideShiftChannel({ apiKey: "offline-secret", fetch: fake.http });
+  expect(await collect(adapter.sync())).toEqual([expect.objectContaining({ direction: "out", sender: "team-user-id", participants: ["creator-id"] })]);
+});
+it("checkpoints an entirely unresolved thread and retries it on restart without swallowing malformed records", async () => {
+  const fake = recruitHarness();
+  fake.reads.set("/support-channels/recruit-room/messages", page([recruit.messages.data[2]]));
+  const adapter = createSideShiftChannel({ apiKey: "offline-secret", fetch: fake.http });
+  const checkpoints: string[] = [];
+  expect(await collect(adapter.sync(undefined, c => checkpoints.push(c)))).toEqual([]);
+  expect(checkpoints).toHaveLength(1);
+  fake.reads.set("/support-channels/recruit-room/messages", page([{ ...recruit.messages.data[2], senderUserId: "company-id" }]));
+  const fresh = createSideShiftChannel({ apiKey: "offline-secret", fetch: fake.http });
+  expect(await collect(fresh.sync(checkpoints[0]))).toEqual([expect.objectContaining({ direction: "out" })]);
+  fake.reads.set("/support-channels/recruit-room/messages", page([{ ...recruit.messages.data[2], createdAt: "not-a-date" }]));
+  await expect(collect(fresh.sync(fresh.getCursor()))).rejects.toThrow("invalid message timestamp");
 });

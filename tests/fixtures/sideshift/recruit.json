@@ -1,0 +1,127 @@
+{
+  "jobs": {
+    "data": [
+      {
+        "id": "job-id",
+        "companyId": "company-id"
+      }
+    ]
+  },
+  "supportChannels": {
+    "data": [
+      {
+        "id": "recruit-room",
+        "customName": null,
+        "customerUser": {
+          "username": null,
+          "name": "Fixture Creator",
+          "externalUserId": null
+        },
+        "customerName": "Fixture Creator",
+        "lastMessageAt": "2026-10-14T01:48:25.383Z",
+        "lastMessagePreview": "Here is our brief: https://example.invalid/brief",
+        "lastMessageBy": "Fixture Operator",
+        "resolvedAt": null,
+        "createdAt": null,
+        "chatType": "native",
+        "customerUserId": "creator-id"
+      }
+    ],
+    "nextCursor": null,
+    "hasMore": false
+  },
+  "conversations": {
+    "data": [
+      {
+        "id": "recruit-room",
+        "lastMessage": "Here is our brief: https://example.invalid/brief",
+        "lastMessageBy": "Fixture Operator",
+        "members": [
+          "company-id",
+          "creator-id"
+        ],
+        "groupName": null,
+        "isProgramGroupChat": false,
+        "isSystemNotification": false,
+        "timestamp": "2026-10-14T01:48:25.383Z",
+        "isBookmarked": false,
+        "unreadCount": 0,
+        "chatType": "native",
+        "kind": "support",
+        "participants": [
+          {
+            "id": "creator-id",
+            "name": "Fixture Creator",
+            "profileImageUrl": null
+          }
+        ],
+        "channelId": null
+      }
+    ],
+    "nextCursor": null,
+    "hasMore": false
+  },
+  "messages": {
+    "data": [
+      {
+        "id": "brief-id",
+        "content": "Here is our brief: https://example.invalid/brief",
+        "source": "native",
+        "sender": "Fixture Operator",
+        "timestamp": "2026-10-14T01:48:25.383Z",
+        "senderName": "Fixture Operator",
+        "senderUsername": null,
+        "createdAt": "2026-10-14T01:48:25.383Z",
+        "updatedAt": "2026-10-14T01:48:25.383Z",
+        "isEdited": false,
+        "isDeleted": false,
+        "replyingToMessageId": null,
+        "threadRootId": null,
+        "reactionCounts": [],
+        "attachmentCount": 0,
+        "senderExternalUserId": null,
+        "senderUserId": "company-id"
+      },
+      {
+        "id": "reply-id",
+        "content": "Yes, interested.",
+        "source": "native",
+        "sender": "Fixture Creator",
+        "timestamp": "2026-10-14T00:58:47.415Z",
+        "senderName": "Fixture Creator",
+        "senderUsername": null,
+        "createdAt": "2026-10-14T00:58:47.415Z",
+        "updatedAt": "2026-10-14T00:58:47.415Z",
+        "isEdited": false,
+        "isDeleted": false,
+        "replyingToMessageId": null,
+        "threadRootId": null,
+        "reactionCounts": [],
+        "attachmentCount": 0,
+        "senderExternalUserId": null,
+        "senderUserId": "creator-id"
+      },
+      {
+        "id": "invite-id",
+        "content": "Thank you for applying. Are you interested?",
+        "source": "native",
+        "sender": "Fixture Brand",
+        "timestamp": "2026-10-14T00:49:14.221Z",
+        "senderName": "Fixture Brand",
+        "senderUsername": null,
+        "createdAt": "2026-10-14T00:49:14.221Z",
+        "updatedAt": "2026-10-14T00:49:14.221Z",
+        "isEdited": false,
+        "isDeleted": false,
+        "replyingToMessageId": null,
+        "threadRootId": null,
+        "reactionCounts": [],
+        "attachmentCount": 0,
+        "senderExternalUserId": null,
+        "senderUserId": null
+      }
+    ],
+    "nextCursor": null,
+    "hasMore": false
+  }
+}

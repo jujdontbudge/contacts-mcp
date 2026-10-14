@@ -61,6 +61,8 @@ export interface Channel {
   /** Resolve a configured/unique account before taking its durable sync lease. */
   resolveAccountId?(): Promise<string>;
   getCursor?(): string | undefined;
+  /** Safe diagnostics for a completed pass that skipped individual records. */
+  getSyncWarning?(): string | undefined;
   /** Identity discovery without fabricating messages or conversations. */
   syncProfiles?(cursor?: string): AsyncIterable<HandleProfile>;
   /** Bounded background maintenance, e.g. refresh credentials when due. */
