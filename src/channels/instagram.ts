@@ -268,7 +268,7 @@ export function createInstagramChannel(
           try {
             ({ items } = await client.accounts.contacts.search(
               self.accountID,
-              { query: `@${requested}` },
+              { query: requested },
               { timeout: 180_000, maxRetries: 0 },
             ));
           } catch {

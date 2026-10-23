@@ -135,7 +135,7 @@ it("resolves exact usernames through contacts before starting a DM and refuses f
   await channel.send(target, { text: "hi" });
   expect(client.accounts.contacts.search).toHaveBeenCalledWith(
     "ig",
-    { query: "@alice" },
+    { query: "alice" },
     expect.objectContaining({ timeout: 180000, maxRetries: 0 }),
   );
   expect(client.chats.start).toHaveBeenCalledWith({
